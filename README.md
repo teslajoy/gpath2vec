@@ -1,2 +1,2 @@
 # pathway2vec
-A Python package for converting biological pathways to embeddings with enrichment analysis attributes.
+A Python package for converting gene-sets to biological pathways embeddings with enrichment analysis attributes.
