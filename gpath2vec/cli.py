@@ -1,5 +1,5 @@
 """
-Command-line interface for Pathway2Vec.
+Command-line interface for gpath2Vec.
 
 1. Performing pathway enrichment analysis
 2. Creating pathway networks
@@ -21,7 +21,7 @@ from gpath2vec.net import Net
 
 @click.group()
 def cli():
-    """Convert biological pathways to embeddings with enrichment analysis"""
+    """convert biological pathways to embeddings with enrichment analysis"""
     pass
 
 
@@ -323,5 +323,7 @@ def run_pipeline(genes, output_dir, study_id, dimensions, window, epochs, organi
     click.echo(f"  • model: {model_path}")
 
 
-if __name__ == "__main__":
-    cli()
+
+def main():
+    """entry point for the command-line interface."""
+    return cli()
