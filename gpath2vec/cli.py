@@ -15,8 +15,8 @@ import click
 from pathlib import Path
 from datetime import datetime
 
-from pathway2vec.embedder import PathwayMetapath2vec
-from pathway2vec.net import Net
+from gpath2vec.embedder import PathwayMetapath2vec
+from gpath2vec.net import Net
 
 
 @click.group()

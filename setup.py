@@ -3,22 +3,23 @@ from setuptools import setup, find_packages
 __version__ = '1.0.0'
 
 setup(
-    name="pathway2vec",
+    name="gpath2vec",
     version=__version__,
     packages=find_packages(),
     description="Pathway to embedding vectors",
     long_description=open('README.md').read(),
-    url='https://github.com/teslajoy/pathway2vec',
+    url='https://github.com/teslajoy/gpath2vec',
     author='Nasim Sanati',
     install_requires=[
         "torch",
         "networkx",
         "requests",
-        "click"
+        "click",
+        "numpy"
     ],
     entry_points={
         'console_scripts': [
-            'pathway2vec=pathway2vec.cli:main',
+            'gpath2vec=gpath2vec.cli:main',
         ],
     },
     author_email="nasim@plenary.org",
