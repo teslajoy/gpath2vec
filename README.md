@@ -6,3 +6,4 @@ A Python package for converting gene-sets to biological pathways embeddings with
 2. Create pathway networks
 3. Generate pathway embeddings
    
+![gpath2vec.png](./img/gpath2vec.png)
