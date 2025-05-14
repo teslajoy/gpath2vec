@@ -241,7 +241,7 @@ def generate_embeddings(network_path, study_id, dimensions, window, epochs, out_
         click.echo(f"Word2Vec model saved to {save_model}")
 
 
-@cli.command('pipeline')
+@cli.command('end2end')
 @click.option('--genes', required=True,
               help='Comma-separated list of genes or path to file with one gene per line')
 @click.option('--output_dir', required=True,
