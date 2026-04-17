@@ -123,11 +123,26 @@ enrichment = [{"stId": r["stId"], "entities": {"fdr": r["fdr_bh"]}}
 net = Net(enrichment=enrichment, id="my_study", digraph=True,
           level="low", gene_filter=tf_genes, clusters=clusters)
 
-# embeddings
+# embeddings (pick a method)
+from gpath2vec.embedder import (
+    PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder, LINEEmbedder
+)
+
+# metapath2vec: weighted random walks + skipgram on the graph
 embedder = PathwayMetapath2vec(graph=net.graph, name="my_study",
                                 walks_per_node=10, walk_length=100)
 walks = embedder.model
 embedder.train_embeddings(walks=walks, dimensions=512, epochs=15, lr=0.005)
+
+# svd: truncated svd on the ea matrix (no graph, baseline)
+embedder = SVDEmbedder(matrix, dimensions=512)
+
+# spectral: laplacian eigenmaps on the graph (deterministic)
+embedder = SpectralGraphEmbedder(net.graph, dimensions=512)
+
+# line: first + second order proximity on the graph (weighted edges)
+embedder = LINEEmbedder(net.graph, dimensions=512, epochs=15, lr=0.005)
+
 embeddings = embedder.get_embeddings()
 ```
 
@@ -140,12 +155,31 @@ gpath2vec enrichment --genes "EGFR,EGF,FGFR2" --level low --out-path results.jso
 # network
 gpath2vec network --enrichment-path results.json --level low --out-path net.pkl
 
-# embeddings
+# embeddings (default: metapath2vec)
 gpath2vec embeddings --network-path net.pkl --dimensions 512 --out-path emb.pkl
 
-# full pipeline
-gpath2vec end2end --genes "EGFR,EGF" --level low --output-dir output/
+# embeddings with alternative methods
+gpath2vec embeddings --network-path net.pkl --method svd --ea-matrix-path ea_matrix.csv --out-path emb.pkl
+gpath2vec embeddings --network-path net.pkl --method spectral --out-path emb.pkl
+gpath2vec embeddings --network-path net.pkl --method line --out-path emb.pkl
+
+# full pipeline with method choice
+gpath2vec end2end --genes "EGFR,EGF" --level low --method line --output-dir output/
 ```
+
+## embedding methods
+
+| method | input | training | edge weights | deterministic |
+|--------|-------|----------|-------------|---------------|
+| metapath2vec | graph | skipgram on random walks | yes (biases walks) | no |
+| svd | ea matrix | truncated svd | n/a (no graph) | yes |
+| spectral | graph | laplacian eigenmaps | yes | yes |
+| line | graph | first + second order proximity | yes (samples proportional) | no |
+
+- **metapath2vec**: best for capturing heterogeneous graph structure (pathway hierarchy + cluster nodes). requires training.
+- **svd**: baseline. operates on the ea matrix directly, no graph structure. fast, deterministic. if svd gives the same results as metapath2vec, the graph isn't adding signal.
+- **spectral**: deterministic embedding from the graph laplacian. good comparison point for metapath2vec without training variance.
+- **line**: handles edge weights more explicitly than metapath2vec. two objectives capture both local (direct neighbors) and global (shared neighbor) structure.
 
 ## pathway levels
 

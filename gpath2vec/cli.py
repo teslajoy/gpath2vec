@@ -10,7 +10,33 @@ import click
 
 from gpath2vec.ea import enrich, ea_matrix
 from gpath2vec.net import Net
-from gpath2vec.embedder import PathwayMetapath2vec
+from gpath2vec.embedder import (
+    PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder, LINEEmbedder
+)
+
+METHODS = ["metapath2vec", "svd", "spectral", "line"]
+
+
+def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr, window):
+    """run the selected embedding method, return embeddings dict."""
+    if method == "metapath2vec":
+        embedder = PathwayMetapath2vec(graph=graph, name=study_id)
+        walks = embedder.model
+        click.echo(f"{len(walks)} random walks")
+        embedder.train_embeddings(walks=walks, dimensions=dimensions,
+                                  window_size=window, epochs=epochs, lr=lr)
+    elif method == "svd":
+        if ea_mat is None:
+            raise click.UsageError("svd requires an ea matrix (run enrichment first)")
+        embedder = SVDEmbedder(ea_mat, dimensions=dimensions)
+    elif method == "spectral":
+        embedder = SpectralGraphEmbedder(graph, dimensions=dimensions)
+    elif method == "line":
+        embedder = LINEEmbedder(graph, dimensions=dimensions, epochs=epochs, lr=lr)
+    else:
+        raise click.UsageError(f"unknown method: {method}")
+
+    return embedder
 
 
 def _parse_genes(genes_str):
@@ -152,26 +178,33 @@ def create_network(enrichment_path, study_id, level, gene_filter, weight, digrap
 
 @cli.command("embeddings")
 @click.option("--network-path", required=True, help="network pickle file")
+@click.option("--ea-matrix-path", required=False, help="ea matrix csv (required for svd)")
+@click.option("--method", default="metapath2vec", show_default=True,
+              type=click.Choice(METHODS))
 @click.option("--study-id", required=False)
 @click.option("--dimensions", default=512, show_default=True)
 @click.option("--window", default=5, show_default=True)
 @click.option("--epochs", default=10, show_default=True)
+@click.option("--lr", default=0.005, show_default=True)
 @click.option("--out-path", required=True, help="output path (pickle)")
 @click.option("--save-model", required=False, help="optional model save path")
-def generate_embeddings(network_path, study_id, dimensions, window, epochs, out_path, save_model):
-    """generate pathway embeddings from network"""
+def generate_embeddings(network_path, ea_matrix_path, method, study_id,
+                        dimensions, window, epochs, lr, out_path, save_model):
+    """generate embeddings from network (metapath2vec, svd, spectral, line)"""
+    import pandas as pd
+
     assert Path(network_path).is_file(), f"{network_path} not found"
     study_id = _make_id(study_id)
 
     net = Net(id=study_id)
     net.load(network_path)
 
-    embedder = PathwayMetapath2vec(graph=net.graph, name=study_id)
-    walks = embedder.model
-    click.echo(f"{len(walks)} random walks")
+    ea_mat = None
+    if ea_matrix_path and Path(ea_matrix_path).is_file():
+        ea_mat = pd.read_csv(ea_matrix_path, index_col=0)
 
-    embedder.train_embeddings(walks=walks, dimensions=dimensions,
-                              window_size=window, epochs=epochs)
+    embedder = _run_embedder(method, net.graph, ea_mat, study_id,
+                             dimensions, epochs, lr, window)
     embeddings = embedder.get_embeddings()
     click.echo(f"embeddings for {len(embeddings)} nodes")
 
@@ -198,11 +231,14 @@ def generate_embeddings(network_path, study_id, dimensions, window, epochs, out_
               help="comma-separated genes to filter pathway universe")
 @click.option("--weight", default="fdr", show_default=True,
               type=click.Choice(["fdr", "oddsratio"]))
+@click.option("--method", default="metapath2vec", show_default=True,
+              type=click.Choice(METHODS))
 @click.option("--dimensions", default=512, show_default=True)
 @click.option("--window", default=5, show_default=True)
 @click.option("--epochs", default=10, show_default=True)
+@click.option("--lr", default=0.005, show_default=True)
 def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
-                 weight, dimensions, window, epochs):
+                 weight, method, dimensions, window, epochs, lr):
     """run the full pipeline: enrichment -> network -> embeddings"""
     study_id = _make_id(study_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -213,7 +249,6 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
     embeddings_path = os.path.join(output_dir, f"{study_id}_embeddings.pkl")
     model_path = os.path.join(output_dir, f"{study_id}_model.pt")
 
-    # parse input
     if gene_sets:
         gs = _parse_gene_sets(gene_sets)
     elif genes:
@@ -258,11 +293,9 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
     net.save(network_path)
 
     # embeddings
-    click.echo("step 3: embeddings")
-    embedder = PathwayMetapath2vec(graph=net.graph, name=study_id)
-    walks = embedder.model
-    embedder.train_embeddings(walks=walks, dimensions=dimensions,
-                              window_size=window, epochs=epochs)
+    click.echo(f"step 3: embeddings ({method})")
+    embedder = _run_embedder(method, net.graph, matrix, study_id,
+                             dimensions, epochs, lr, window)
     embeddings = embedder.get_embeddings()
     with open(embeddings_path, "wb") as f:
         pickle.dump(embeddings, f)
