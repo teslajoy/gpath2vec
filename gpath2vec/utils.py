@@ -1,43 +1,86 @@
+"""shared utilities for fetching and caching reactome data."""
+
+import os
+import json
+from pathlib import Path
+
 import requests
-from requests.exceptions import ConnectionError
+from requests.exceptions import ConnectionError, RequestException
 
-def get_event_hierarchy(species='9606'):
+
+def _cache_dir():
     """
-    Fetches the full event hierarchy for a given species in Reactome.
-
-    :param species: Species name (e.g., Homo sapiens) or species taxId (e.g., 9606)
-    :return: JSON list object of the full event hierarchy for the given species
+    return the cache directory for reactome data.
+    priority: GPATH2VEC_REACTOME_DIR env var > ~/.gpath2vec/cache
     """
-    headers = {
-        'accept': 'application/json',
-    }
+    d = os.environ.get("GPATH2VEC_REACTOME_DIR")
+    if d:
+        return Path(d)
+    default = Path.home() / ".gpath2vec" / "cache"
+    default.mkdir(parents=True, exist_ok=True)
+    return default
 
-    url = f'https://reactome.org/ContentService/data/eventsHierarchy/{species}'
+
+# keep this for backwards compat with ea.py / net.py
+_local_dir = _cache_dir
+
+
+def fetch(filename, url, binary=False):
+    """
+    fetch a file from url, caching locally on first download.
+    returns text or bytes depending on binary flag. returns None on failure.
+    """
+    cache = _cache_dir()
+    cached = cache / filename
+
+    if cached.exists():
+        return cached.read_bytes() if binary else cached.read_text()
 
     try:
-        response = requests.get(url=url, headers=headers)
-        response.raise_for_status()  # Raises HTTPError for bad responses
-    except ConnectionError as e:
-        print(e)
-        return None
-    except requests.exceptions.HTTPError as errh:
-        print ("HTTP Error:",errh)
-        return None
-    except requests.exceptions.ConnectionError as errc:
-        print ("Error Connecting:",errc)
-        return None
-    except requests.exceptions.Timeout as errt:
-        print ("Timeout Error:",errt)
-        return None
-    except requests.exceptions.RequestException as err:
-        print ("Something went wrong with the request",err)
+        r = requests.get(url=url)
+        r.raise_for_status()
+    except (ConnectionError, RequestException) as e:
+        print(f"[gpath2vec] {e}")
         return None
 
-    return response.json()
+    # save to cache
+    if binary:
+        cached.write_bytes(r.content)
+    else:
+        cached.write_text(r.text)
 
-hierarchy = get_event_hierarchy(species='9606')
-#if hierarchy is not None:
-#    print(hierarchy)
+    return r.content if binary else r.text
+
+
+def get_event_hierarchy(species="9606"):
+    """fetch the full event hierarchy for a species from reactome."""
+    cached = _cache_dir() / f"events_hierarchy_{species}.json"
+    if cached.exists():
+        with open(cached) as f:
+            return json.load(f)
+
+    url = f"https://reactome.org/ContentService/data/eventsHierarchy/{species}"
+    try:
+        r = requests.get(url=url, headers={"accept": "application/json"})
+        r.raise_for_status()
+    except (ConnectionError, RequestException) as e:
+        print(f"[gpath2vec] could not fetch event hierarchy: {e}")
+        return None
+
+    data = r.json()
+    with open(cached, "w") as f:
+        json.dump(data, f)
+    return data
+
+
+_hierarchy_cache = None
+
+
+def _hierarchy():
+    global _hierarchy_cache
+    if _hierarchy_cache is None:
+        _hierarchy_cache = get_event_hierarchy(species="9606")
+    return _hierarchy_cache
 
 
 def get_json_items(json_obj, key):
@@ -53,29 +96,29 @@ def get_json_items(json_obj, key):
 
 
 def pathway_parent_mappings():
-    parent = [p['name'] for p in hierarchy]
-    pathways = [list(set(get_json_items(p, 'stId'))) for p in hierarchy]
-    [pathways[i].append(hierarchy[i]['stId']) for i in range(len(pathways))]
+    hierarchy = _hierarchy()
+    if hierarchy is None:
+        return {}
+    parent = [p["name"] for p in hierarchy]
+    pathways = [list(set(get_json_items(p, "stId"))) for p in hierarchy]
+    for i in range(len(pathways)):
+        pathways[i].append(hierarchy[i]["stId"])
     pathway_mappings = {parent[i]: pathways[i] for i in range(len(parent))}
-    pathway_mappings_nodes = {v: k for k, values in pathway_mappings.items() for v in values}
-    return pathway_mappings_nodes
+    return {v: k for k, values in pathway_mappings.items() for v in values}
 
 
 def pathway_name_mappings():
-    url = "https://reactome.org/download/current/ReactomePathways.txt"
-
-    try:
-        response = requests.get(url=url)
-    except ConnectionError as e:
-        print(e)
+    """stId -> pathway name mapping."""
+    text = fetch("ReactomePathways.txt",
+                 "https://reactome.org/download/current/ReactomePathways.txt")
+    if text is None:
         return {}
 
-    if response.status_code == 200:
-        content_list = response.text.splitlines()
-        entities = [tuple(d.split("\t"))[:2] for d in content_list if '-HSA' in d]
-        entities = dict(entities)
-    else:
-        print('Status code returned a value of %s' % response.status_code)
-        entities = {}
-
+    entities = {}
+    for line in text.splitlines():
+        if "-HSA" not in line:
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            entities[parts[0]] = parts[1]
     return entities

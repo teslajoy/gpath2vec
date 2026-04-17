@@ -1,22 +1,67 @@
-"""
-Command-line interface for gpath2Vec.
+"""cli for gpath2vec: enrichment, network, embeddings."""
 
-1. Performing pathway enrichment analysis
-2. Creating pathway networks
-3. Generating pathway embeddings
-"""
-
-import sys
 import os
 import json
 import pickle
-import requests
-import click
 from pathlib import Path
 from datetime import datetime
 
-from gpath2vec.embedder import PathwayMetapath2vec
+import click
+
+from gpath2vec.ea import enrich, ea_matrix
 from gpath2vec.net import Net
+from gpath2vec.embedder import (
+    PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder, LINEEmbedder
+)
+
+METHODS = ["metapath2vec", "svd", "spectral", "line"]
+
+
+def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr, window):
+    """run the selected embedding method, return embeddings dict."""
+    if method == "metapath2vec":
+        embedder = PathwayMetapath2vec(graph=graph, name=study_id)
+        walks = embedder.model
+        click.echo(f"{len(walks)} random walks")
+        embedder.train_embeddings(walks=walks, dimensions=dimensions,
+                                  window_size=window, epochs=epochs, lr=lr)
+    elif method == "svd":
+        if ea_mat is None:
+            raise click.UsageError("svd requires an ea matrix (run enrichment first)")
+        embedder = SVDEmbedder(ea_mat, dimensions=dimensions)
+    elif method == "spectral":
+        embedder = SpectralGraphEmbedder(graph, dimensions=dimensions)
+    elif method == "line":
+        embedder = LINEEmbedder(graph, dimensions=dimensions, epochs=epochs, lr=lr)
+    else:
+        raise click.UsageError(f"unknown method: {method}")
+
+    return embedder
+
+
+def _parse_genes(genes_str):
+    """parse gene list from comma-separated string or file path."""
+    if Path(genes_str).is_file():
+        with open(genes_str) as f:
+            return [line.strip() for line in f if line.strip()]
+    return [g.strip() for g in genes_str.split(",") if g.strip()]
+
+
+def _parse_gene_sets(gene_sets_str):
+    """parse gene sets from json file or json string. returns {name: [genes]}."""
+    p = Path(gene_sets_str)
+    if p.is_file():
+        with open(p) as f:
+            return json.load(f)
+    return json.loads(gene_sets_str)
+
+
+def _make_id(study_id):
+    return study_id or f"study_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def _outdir(path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
 
 @click.group()
@@ -25,305 +70,245 @@ def cli():
     pass
 
 
-@cli.command('enrichment')
-@click.option('--genes', required=True,
-              help='Comma-separated list of genes or path to file with one gene per line')
-@click.option('--organism', required=False,
-              default='human',
-              show_default=True,
-              help='Organism for enrichment analysis')
-@click.option('--out_path', required=True,
-              help='Path to save enrichment results - JSON format')
-@click.option('--threshold', required=False,
-              default=0.05,
-              help='Enrichment analysis FDR p-value threshold')
-@click.option('--verbose', is_flag=True, required=False,
-              default=False,
-              show_default=True)
-def perform_enrichment(genes, organism, threshold, out_path, verbose):
-    """perform pathway enrichment analysis using g:Profiler"""
-    gene_list = []
-    if Path(genes).is_file():
-        with open(genes, 'r') as f:
-            gene_list = [line.strip() for line in f if line.strip()]
+@cli.command("enrichment")
+@click.option("--genes", required=True,
+              help="comma-separated genes or path to file (one per line)")
+@click.option("--gene-sets", required=False,
+              help="json file or string with {name: [genes]} for multiple gene lists")
+@click.option("--level", default="low", show_default=True,
+              type=click.Choice(["high", "mid", "low", "all"]))
+@click.option("--gene-filter", required=False,
+              help="comma-separated genes to filter pathway universe (e.g. TF genes)")
+@click.option("--weight", default="fdr", show_default=True,
+              type=click.Choice(["fdr", "oddsratio"]),
+              help="weight type for ea matrix")
+@click.option("--min-genes", default=3, show_default=True)
+@click.option("--out-path", required=True, help="output path (json)")
+def perform_enrichment(genes, gene_sets, level, gene_filter, weight, min_genes, out_path):
+    """run pathway enrichment analysis via fisher's exact test"""
+    if gene_sets:
+        gs = _parse_gene_sets(gene_sets)
     else:
-        gene_list = [g.strip() for g in genes.split(',') if g.strip()]
+        gene_list = _parse_genes(genes)
+        gs = {"study": gene_list}
 
-    if verbose:
-        click.echo(f"Performing enrichment analysis for {len(gene_list)} genes...")
+    gf = _parse_genes(gene_filter) if gene_filter else None
 
-    api_url = "https://biit.cs.ut.ee/gprofiler/api/gost/profile/"
-    payload = {
-        "organism": "hsapiens" if organism == "human" else organism,
-        "query": gene_list,
-        "sources": ["REAC"],
-        "user_threshold": threshold,
-        "all_results": True,
-        "ordered": False,
-        "no_iea": False,
-        "measure_underrepresentation": False,
-        "domain_scope": "annotated",
-        "significance_threshold_method": "g_SCS"
-    }
+    click.echo(f"enrichment: {len(gs)} gene sets, level={level}")
+    ea_df = enrich(gs, level=level, gene_filter=gf, min_genes=min_genes)
 
-    try:
-        response = requests.post(api_url, json=payload)
-        response.raise_for_status()
-        result = response.json()
-    except requests.exceptions.RequestException as e:
-        click.echo(f"Error during enrichment analysis: {e}", err=True)
-        sys.exit(1)
+    if ea_df.empty:
+        click.echo("no results")
+        return
 
-    pathway_results = []
-    if "result" in result and result["result"]:
-        for item in result["result"]:
-            if item["source"] == "REAC":
-                reactome_id = item["native"].replace("REAC:", "")
-                pathway_result = {
-                    "stId": reactome_id,
-                    "entities": {
-                        "fdr": item["p_value"],
-                        "genes": item["intersections"]
-                    },
-                    "name": item["name"],
-                    "pValue": item["p_value"],
-                    "significant": item["p_value"] < threshold
-                }
-                pathway_results.append(pathway_result)
+    sig = ea_df.sig_pathway.sum()
+    click.echo(f"{len(ea_df)} tests, {sig} significant")
 
-    pathway_results.sort(key=lambda x: x["entities"]["fdr"])
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-
+    # save ea dataframe as json
+    _outdir(out_path)
+    records = ea_df.to_dict(orient="records")
     with open(out_path, "w") as f:
-        json.dump(pathway_results, f, indent=2)
+        json.dump(records, f, indent=2)
 
-    significant_count = sum(1 for p in pathway_results if p["significant"])
-    click.echo(f"Found {len(pathway_results)} Reactome pathways, {significant_count} significant (FDR < 0.05)")
-    click.echo(f"Enrichment results saved to {out_path}")
+    # save ea matrix alongside
+    matrix = ea_matrix(ea_df, weight=weight)
+    matrix_path = out_path.replace(".json", "_matrix.csv")
+    matrix.to_csv(matrix_path)
+    click.echo(f"saved to {out_path}")
+    click.echo(f"ea matrix ({matrix.shape[0]} x {matrix.shape[1]}) saved to {matrix_path}")
 
 
-@cli.command('network')
-@click.option('--enrichment_path', required=True,
-              help='Path to enrichment results JSON file')
-@click.option('--study_id', required=False,
-              help='Study identifier (defaults to timestamp-based ID)')
-@click.option('--digraph', is_flag=True, required=False,
-              default=True,
-              show_default=True,
-              help='Create directed graph')
-@click.option('--induce', is_flag=True, required=False,
-              default=False,
-              show_default=True,
-              help='Induce subgraph of significant pathways')
-@click.option('--study', is_flag=True, required=False,
-              default=True,
-              show_default=True,
-              help='Include study nodes and edge weights')
-@click.option('--out_path', required=True,
-              help='Path to save network (pickle format)')
-@click.option('--verbose', is_flag=True, required=False,
-              default=False,
-              show_default=True)
-def create_network(enrichment_path, study_id, digraph, induce, study, out_path, verbose):
+@cli.command("network")
+@click.option("--enrichment-path", required=True, help="enrichment results json")
+@click.option("--study-id", required=False)
+@click.option("--level", default="all", show_default=True,
+              type=click.Choice(["high", "mid", "low", "all"]))
+@click.option("--gene-filter", required=False,
+              help="comma-separated genes to filter pathway universe")
+@click.option("--weight", default="fdr", show_default=True,
+              type=click.Choice(["fdr", "oddsratio"]),
+              help="weight type for cluster edges")
+@click.option("--digraph", is_flag=True, default=True, show_default=True)
+@click.option("--induce", is_flag=True, default=False, show_default=True)
+@click.option("--out-path", required=True, help="output path (pickle)")
+def create_network(enrichment_path, study_id, level, gene_filter, weight, digraph, induce, out_path):
     """create a pathway network from enrichment results"""
-    assert Path(enrichment_path).is_file(), f"Path {enrichment_path} is not a valid file path."
+    assert Path(enrichment_path).is_file(), f"{enrichment_path} not found"
+    study_id = _make_id(study_id)
+    gf = _parse_genes(gene_filter) if gene_filter else None
 
-    if not study_id:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        study_id = f"study_{timestamp}"
+    with open(enrichment_path) as f:
+        ea_records = json.load(f)
 
-    with open(enrichment_path, 'r') as f:
-        enrichment_results = json.load(f)
+    # build enrichment list for Net
+    enrichment = []
+    seen = set()
+    for r in ea_records:
+        stid = r["stId"]
+        if stid not in seen:
+            fdr = r.get("fdr_bh", r.get("entities", {}).get("fdr", 1.0))
+            enrichment.append({"stId": stid, "entities": {"fdr": fdr}})
+            seen.add(stid)
 
-    if verbose:
-        click.echo(f"Creating pathway network for study {study_id}...")
+    # build cluster dict from ea records
+    clusters = {}
+    for r in ea_records:
+        cname = r.get("cluster", "study")
+        if not r.get("sig_pathway", False):
+            continue
+        if cname not in clusters:
+            clusters[cname] = {}
+        val = (1 - r["fdr_bh"]) if weight == "fdr" else r.get("oddsratio", 1.0)
+        clusters[cname][r["stId"]] = val
 
-    network = Net(
-        enrichment=enrichment_results,
-        id=study_id,
-        digraph=digraph,
-        induce=induce,
-        study=study
-    )
+    net = Net(enrichment=enrichment, id=study_id, digraph=digraph,
+              induce=induce, level=level, gene_filter=gf,
+              clusters=clusters if clusters else None)
 
-    graph = network.graph
-    node_count = graph.number_of_nodes()
-    edge_count = graph.number_of_edges()
-    sig_count = sum(1 for _, attr in graph.nodes(data=True)
-                    if "node_type" in attr and attr["node_type"] == "sig")
+    g = net.graph
+    sig = sum(1 for _, a in g.nodes(data=True) if a.get("node_type") == "sig")
+    n_clusters = sum(1 for _, a in g.nodes(data=True) if a.get("node_type") == "cluster")
+    click.echo(f"network: {g.number_of_nodes()} nodes, {g.number_of_edges()} edges, "
+               f"{sig} significant, {n_clusters} clusters")
 
-    if verbose:
-        click.echo(f"Network created with {node_count} nodes and {edge_count} edges")
-        click.echo(f"Significant pathways: {sig_count}")
-
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-
-    network.save_graph(out_path)
-    click.echo(f"Network saved to {out_path}")
+    _outdir(out_path)
+    net.save(out_path)
+    click.echo(f"saved to {out_path}")
 
 
-@cli.command('embeddings')
-@click.option('--network_path', required=True,
-              help='Path to network pickle file')
-@click.option('--study_id', required=False,
-              help='Study identifier (defaults to timestamp-based ID)')
-@click.option('--dimensions', required=False,
-              default=128,
-              show_default=True,
-              help='Embedding dimensions')
-@click.option('--window', required=False,
-              default=5,
-              show_default=True,
-              help='Context window size')
-@click.option('--epochs', required=False,
-              default=10,
-              show_default=True,
-              help='Training epochs')
-@click.option('--out_path', required=True,
-              help='Path to save embeddings (pickle format)')
-@click.option('--save_model', required=False,
-              help='Path to save full Word2Vec model (optional)')
-@click.option('--verbose', is_flag=True, required=False,
-              default=False,
-              show_default=True)
-def generate_embeddings(network_path, study_id, dimensions, window, epochs, out_path, save_model, verbose):
-    """generate pathway embeddings from network"""
-    assert Path(network_path).is_file(), f"Path {network_path} is not a valid file path."
+@cli.command("embeddings")
+@click.option("--network-path", required=True, help="network pickle file")
+@click.option("--ea-matrix-path", required=False, help="ea matrix csv (required for svd)")
+@click.option("--method", default="metapath2vec", show_default=True,
+              type=click.Choice(METHODS))
+@click.option("--study-id", required=False)
+@click.option("--dimensions", default=512, show_default=True)
+@click.option("--window", default=5, show_default=True)
+@click.option("--epochs", default=10, show_default=True)
+@click.option("--lr", default=0.005, show_default=True)
+@click.option("--out-path", required=True, help="output path (pickle)")
+@click.option("--save-model", required=False, help="optional model save path")
+def generate_embeddings(network_path, ea_matrix_path, method, study_id,
+                        dimensions, window, epochs, lr, out_path, save_model):
+    """generate embeddings from network (metapath2vec, svd, spectral, line)"""
+    import pandas as pd
 
-    if not study_id:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        study_id = f"study_{timestamp}"
+    assert Path(network_path).is_file(), f"{network_path} not found"
+    study_id = _make_id(study_id)
 
-    network = Net(
-        enrichment=[],
-        id=study_id,
-        digraph=True,
-        induce=False,
-        study=True
-    )
-    network.load_graph(network_path)
+    net = Net(id=study_id)
+    net.load(network_path)
 
-    if verbose:
-        click.echo(f"Generating pathway embeddings for study {study_id}...")
+    ea_mat = None
+    if ea_matrix_path and Path(ea_matrix_path).is_file():
+        ea_mat = pd.read_csv(ea_matrix_path, index_col=0)
 
-    embedder = PathwayMetapath2vec(
-        graph=network.graph,
-        name=study_id
-    )
-
-    walks = embedder.model
-    if verbose:
-        click.echo(f"Generated {len(walks)} random walks")
-
-    if verbose:
-        click.echo(f"Training Word2Vec model (dimensions={dimensions}, window={window}, epochs={epochs})...")
-
-    model = embedder.train_embeddings(
-        walks=walks,
-        dimensions=dimensions,
-        window_size=window,
-        epochs=epochs
-    )
-
+    embedder = _run_embedder(method, net.graph, ea_mat, study_id,
+                             dimensions, epochs, lr, window)
     embeddings = embedder.get_embeddings()
-    embedding_count = len(embeddings)
-    if verbose:
-        click.echo(f"Generated embeddings for {embedding_count} pathways")
+    click.echo(f"embeddings for {len(embeddings)} nodes")
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-
-    with open(out_path, 'wb') as f:
+    _outdir(out_path)
+    with open(out_path, "wb") as f:
         pickle.dump(embeddings, f)
-    click.echo(f"Embeddings saved to {out_path}")
+    click.echo(f"saved to {out_path}")
 
     if save_model:
         embedder.save_model(save_model)
-        click.echo(f"Word2Vec model saved to {save_model}")
+        click.echo(f"model saved to {save_model}")
 
 
-@cli.command('end2end')
-@click.option('--genes', required=True,
-              help='Comma-separated list of genes or path to file with one gene per line')
-@click.option('--output_dir', required=True,
-              help='Directory to save all output files')
-@click.option('--study_id', required=False,
-              help='Study identifier (defaults to timestamp-based ID)')
-@click.option('--dimensions', required=False,
-              default=128,
-              show_default=True,
-              help='Embedding dimensions')
-@click.option('--window', required=False,
-              default=5,
-              show_default=True,
-              help='Context window size')
-@click.option('--epochs', required=False,
-              default=10,
-              show_default=True,
-              help='Training epochs')
-@click.option('--organism', required=False,
-              default='human',
-              show_default=True,
-              help='Organism for enrichment analysis')
-@click.option('--verbose', is_flag=True, required=False,
-              default=False,
-              show_default=True)
-def run_pipeline(genes, output_dir, study_id, dimensions, window, epochs, organism, verbose):
-    """run the complete Pathway2Vec pipeline (enrichment → network → embeddings)"""
-    if not study_id:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        study_id = f"study_{timestamp}"
-
+@cli.command("end2end")
+@click.option("--genes", required=False,
+              help="comma-separated genes or file path (single gene list)")
+@click.option("--gene-sets", required=False,
+              help="json file or string with {name: [genes]}")
+@click.option("--output-dir", required=True)
+@click.option("--study-id", required=False)
+@click.option("--level", default="low", show_default=True,
+              type=click.Choice(["high", "mid", "low", "all"]))
+@click.option("--gene-filter", required=False,
+              help="comma-separated genes to filter pathway universe")
+@click.option("--weight", default="fdr", show_default=True,
+              type=click.Choice(["fdr", "oddsratio"]))
+@click.option("--method", default="metapath2vec", show_default=True,
+              type=click.Choice(METHODS))
+@click.option("--dimensions", default=512, show_default=True)
+@click.option("--window", default=5, show_default=True)
+@click.option("--epochs", default=10, show_default=True)
+@click.option("--lr", default=0.005, show_default=True)
+def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
+                 weight, method, dimensions, window, epochs, lr):
+    """run the full pipeline: enrichment -> network -> embeddings"""
+    study_id = _make_id(study_id)
     os.makedirs(output_dir, exist_ok=True)
 
     enrichment_path = os.path.join(output_dir, f"{study_id}_enrichment.json")
+    matrix_path = os.path.join(output_dir, f"{study_id}_ea_matrix.csv")
     network_path = os.path.join(output_dir, f"{study_id}_network.pkl")
     embeddings_path = os.path.join(output_dir, f"{study_id}_embeddings.pkl")
-    model_path = os.path.join(output_dir, f"{study_id}_model.model")
+    model_path = os.path.join(output_dir, f"{study_id}_model.pt")
 
-    click.echo("Step 1: performing pathway enrichment analysis...")
-    ctx = click.Context(perform_enrichment)
-    ctx.invoke(
-        perform_enrichment,
-        genes=genes,
-        organism=organism,
-        out_path=enrichment_path,
-        verbose=verbose
-    )
+    if gene_sets:
+        gs = _parse_gene_sets(gene_sets)
+    elif genes:
+        gs = {"study": _parse_genes(genes)}
+    else:
+        raise click.UsageError("provide --genes or --gene-sets")
 
-    click.echo("\nStep 2: creating pathway network...")
-    ctx = click.Context(create_network)
-    ctx.invoke(
-        create_network,
-        enrichment_path=enrichment_path,
-        study_id=study_id,
-        digraph=True,
-        induce=False,
-        study=True,
-        out_path=network_path,
-        verbose=verbose
-    )
+    gf = _parse_genes(gene_filter) if gene_filter else None
 
-    ctx = click.Context(generate_embeddings)
-    ctx.invoke(
-        generate_embeddings,
-        network_path=network_path,
-        study_id=study_id,
-        dimensions=dimensions,
-        window=window,
-        epochs=epochs,
-        out_path=embeddings_path,
-        save_model=model_path,
-        verbose=verbose
-    )
+    # enrichment
+    click.echo("step 1: enrichment")
+    ea_df = enrich(gs, level=level, gene_filter=gf)
+    records = ea_df.to_dict(orient="records")
+    with open(enrichment_path, "w") as f:
+        json.dump(records, f, indent=2)
+    matrix = ea_matrix(ea_df, weight=weight)
+    matrix.to_csv(matrix_path)
 
-    click.echo(f"\nPipeline completed successfully! All results saved to {output_dir}")
-    click.echo(f"  • Enrichment results: {enrichment_path}")
-    click.echo(f"  • Network: {network_path}")
-    click.echo(f"  • Embeddings: {embeddings_path}")
-    click.echo(f"  • model: {model_path}")
+    # network
+    click.echo("step 2: network")
+    enrichment = []
+    seen = set()
+    for r in records:
+        stid = r["stId"]
+        if stid not in seen:
+            enrichment.append({"stId": stid, "entities": {"fdr": r["fdr_bh"]}})
+            seen.add(stid)
+
+    clusters = {}
+    for r in records:
+        cname = r.get("cluster", "study")
+        if not r.get("sig_pathway", False):
+            continue
+        if cname not in clusters:
+            clusters[cname] = {}
+        val = (1 - r["fdr_bh"]) if weight == "fdr" else r.get("oddsratio", 1.0)
+        clusters[cname][r["stId"]] = val
+
+    net = Net(enrichment=enrichment, id=study_id, digraph=True,
+              induce=False, level=level, gene_filter=gf,
+              clusters=clusters if clusters else None)
+    net.save(network_path)
+
+    # embeddings
+    click.echo(f"step 3: embeddings ({method})")
+    embedder = _run_embedder(method, net.graph, matrix, study_id,
+                             dimensions, epochs, lr, window)
+    embeddings = embedder.get_embeddings()
+    with open(embeddings_path, "wb") as f:
+        pickle.dump(embeddings, f)
+    embedder.save_model(model_path)
+
+    click.echo(f"done. output in {output_dir}")
+    click.echo(f"  enrichment: {enrichment_path}")
+    click.echo(f"  ea matrix: {matrix_path}")
+    click.echo(f"  network: {network_path}")
+    click.echo(f"  embeddings: {embeddings_path}")
+    click.echo(f"  model: {model_path}")
 
 
 
 def main():
-    """entry point for the command-line interface."""
     return cli()

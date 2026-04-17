@@ -1,5 +1,7 @@
-from .embedder import Embedder, PathwayMetapath2vec
+from .embedder import Embedder, PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder, LINEEmbedder
 from .net import Net
-import gpath2vec.utils as utils
+from . import ea
+from . import utils
+from . import compare
 
 __version__ = "1.0.0"
