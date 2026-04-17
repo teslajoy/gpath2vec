@@ -162,9 +162,10 @@ gpath2vec embeddings --network-path net.pkl --dimensions 512 --out-path emb.pkl
 gpath2vec embeddings --network-path net.pkl --method svd --ea-matrix-path ea_matrix.csv --out-path emb.pkl
 gpath2vec embeddings --network-path net.pkl --method spectral --out-path emb.pkl
 gpath2vec embeddings --network-path net.pkl --method line --out-path emb.pkl
+gpath2vec embeddings --network-path net.pkl --method vae --ea-matrix-path ea_matrix.csv --out-path emb.pkl
 
 # full pipeline with method choice
-gpath2vec end2end --genes "EGFR,EGF" --level low --method line --output-dir output/
+gpath2vec end2end --genes "EGFR,EGF" --level low --method vae --output-dir output/
 ```
 
 ## embedding methods
@@ -175,11 +176,23 @@ gpath2vec end2end --genes "EGFR,EGF" --level low --method line --output-dir outp
 | svd | ea matrix | truncated svd | n/a (no graph) | yes |
 | spectral | graph | laplacian eigenmaps | yes | yes |
 | line | graph | first + second order proximity | yes (samples proportional) | no |
+| vae | ea matrix | variational autoencoder | n/a (no graph) | no |
 
 - **metapath2vec**: best for capturing heterogeneous graph structure (pathway hierarchy + cluster nodes). requires training.
 - **svd**: baseline. operates on the ea matrix directly, no graph structure. fast, deterministic. if svd gives the same results as metapath2vec, the graph isn't adding signal.
 - **spectral**: deterministic embedding from the graph laplacian. good comparison point for metapath2vec without training variance.
 - **line**: handles edge weights more explicitly than metapath2vec. two objectives capture both local (direct neighbors) and global (shared neighbor) structure.
+- **vae**: variational autoencoder on the ea matrix. smooth latent space where similar pathway profiles map nearby. provides uncertainty estimates (latent variance per cluster) and can generate new pathway activity profiles. nonlinear alternative to svd.
+
+all methods are more configurable from python than the cli. for example, vae exposes `beta` (kl divergence weight), `hidden_dim`, and the full model for downstream use:
+
+```python
+from gpath2vec.embedder import VAEEmbedder
+
+vae = VAEEmbedder(ea_matrix, dimensions=512, beta=0.5, hidden_dim=256)
+embeddings = vae.get_embeddings()       # latent means
+uncertainty = vae.get_uncertainty()      # latent variance per cluster
+```
 
 ## pathway levels
 

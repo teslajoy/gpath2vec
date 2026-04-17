@@ -31,6 +31,136 @@ class Embedder:
         self.embeddings = state["embeddings"]
 
 
+class VAEEmbedder(Embedder):
+    """
+    variational autoencoder on the ea matrix (cluster x pathway).
+    learns a smooth latent space of pathway activity patterns.
+
+    ea_matrix: pandas dataframe (cluster x pathway)
+    dimensions: latent space size
+    hidden_dim: hidden layer size
+    epochs: training epochs
+    lr: learning rate
+    beta: weight on kl divergence (beta-vae)
+    """
+
+    def __init__(self, ea_matrix, dimensions=512, hidden_dim=256,
+                 epochs=50, lr=0.001, beta=1.0):
+        self.ea_matrix = ea_matrix
+        self.dimensions = dimensions
+        self.hidden_dim = hidden_dim
+        self.epochs = epochs
+        self.lr = lr
+        self.beta = beta
+        self.latent_means = {}
+        self.latent_vars = {}
+        super().__init__()
+
+    def method(self):
+        input_dim = self.ea_matrix.shape[1]
+        X = torch.FloatTensor(self.ea_matrix.values)
+        names = list(self.ea_matrix.index)
+
+        class VAE(torch.nn.Module):
+            def __init__(vae, input_dim, hidden_dim, latent_dim):
+                super().__init__()
+                vae.encoder = torch.nn.Sequential(
+                    torch.nn.Linear(input_dim, hidden_dim),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(hidden_dim, hidden_dim),
+                    torch.nn.ReLU(),
+                )
+                vae.mu = torch.nn.Linear(hidden_dim, latent_dim)
+                vae.logvar = torch.nn.Linear(hidden_dim, latent_dim)
+                vae.decoder = torch.nn.Sequential(
+                    torch.nn.Linear(latent_dim, hidden_dim),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(hidden_dim, hidden_dim),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(hidden_dim, input_dim),
+                    torch.nn.Sigmoid(),
+                )
+
+            def encode(vae, x):
+                h = vae.encoder(x)
+                return vae.mu(h), vae.logvar(h)
+
+            def reparameterize(vae, mu, logvar):
+                std = torch.exp(0.5 * logvar)
+                eps = torch.randn_like(std)
+                return mu + eps * std
+
+            def decode(vae, z):
+                return vae.decoder(z)
+
+            def forward(vae, x):
+                mu, logvar = vae.encode(x)
+                z = vae.reparameterize(mu, logvar)
+                return vae.decode(z), mu, logvar
+
+        model = VAE(input_dim, self.hidden_dim, self.dimensions)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
+
+        print(f"vae: {len(names)} clusters, {input_dim} pathways -> {self.dimensions} latent dims")
+
+        batch_size = min(256, len(names))
+        for epoch in range(self.epochs):
+            perm = torch.randperm(len(names))
+            total_loss = 0
+            n_batches = 0
+
+            for i in range(0, len(names), batch_size):
+                batch = X[perm[i:i + batch_size]]
+                recon, mu, logvar = model(batch)
+
+                recon_loss = torch.nn.functional.mse_loss(recon, batch, reduction="sum")
+                kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+                loss = recon_loss + self.beta * kl_loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+                n_batches += 1
+
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                avg = total_loss / len(names)
+                print(f"  epoch {epoch+1}/{self.epochs}, loss: {avg:.4f}")
+
+        # extract latent means as embeddings
+        model.eval()
+        with torch.no_grad():
+            mu, logvar = model.encode(X)
+            embeddings_np = mu.numpy()
+            vars_np = logvar.exp().numpy()
+
+        self.embeddings = {names[i]: embeddings_np[i] for i in range(len(names))}
+        self.latent_means = self.embeddings
+        self.latent_vars = {names[i]: vars_np[i] for i in range(len(names))}
+        self._model = model
+        return model
+
+    def get_uncertainty(self):
+        """return per-cluster latent variance (uncertainty estimate)."""
+        return self.latent_vars
+
+    def save_model(self, path):
+        """
+        saves: embeddings (latent means), latent_vars (uncertainty),
+        and model weights (for generation via model.decode(z)).
+        """
+        torch.save({
+            "embeddings": self.embeddings,
+            "latent_vars": self.latent_vars,
+            "model_state": self._model.state_dict() if hasattr(self, "_model") else None,
+        }, path)
+
+    def load_model(self, path):
+        state = torch.load(path)
+        self.embeddings = state["embeddings"]
+        self.latent_vars = state.get("latent_vars", {})
+
+
 class SVDEmbedder(Embedder):
     """
     truncated svd on the ea matrix (cluster x pathway).

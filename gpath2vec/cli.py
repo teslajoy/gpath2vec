@@ -11,10 +11,11 @@ import click
 from gpath2vec.ea import enrich, ea_matrix
 from gpath2vec.net import Net
 from gpath2vec.embedder import (
-    PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder, LINEEmbedder
+    PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder,
+    LINEEmbedder, VAEEmbedder
 )
 
-METHODS = ["metapath2vec", "svd", "spectral", "line"]
+METHODS = ["metapath2vec", "svd", "spectral", "line", "vae"]
 
 
 def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr, window):
@@ -33,6 +34,10 @@ def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr, windo
         embedder = SpectralGraphEmbedder(graph, dimensions=dimensions)
     elif method == "line":
         embedder = LINEEmbedder(graph, dimensions=dimensions, epochs=epochs, lr=lr)
+    elif method == "vae":
+        if ea_mat is None:
+            raise click.UsageError("vae requires an ea matrix (run enrichment first)")
+        embedder = VAEEmbedder(ea_mat, dimensions=dimensions, epochs=epochs, lr=lr)
     else:
         raise click.UsageError(f"unknown method: {method}")
 

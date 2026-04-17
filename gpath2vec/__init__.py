@@ -1,4 +1,7 @@
-from .embedder import Embedder, PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder, LINEEmbedder
+from .embedder import (
+    Embedder, PathwayMetapath2vec, SVDEmbedder,
+    SpectralGraphEmbedder, LINEEmbedder, VAEEmbedder
+)
 from .net import Net
 from . import ea
 from . import utils
