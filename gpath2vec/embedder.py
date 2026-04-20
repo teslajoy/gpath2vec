@@ -408,7 +408,13 @@ class PathwayMetapath2vec(Embedder):
         print(f"random walks: {len(walks)}")
         return walks
 
-    def train_embeddings(self, walks, dimensions=512, window_size=5, epochs=10, lr=0.025):
+    def train_embeddings(self, walks, dimensions=512, window_size=5, epochs=10,
+                         lr=0.025, batch_size=1024, n_neg=5, walks_per_chunk=5000):
+        """
+        skip-gram with negative sampling. streams (target, context) pairs per
+        chunk of walks instead of materializing every pair upfront, so memory
+        stays O(chunk) rather than O(all pairs).
+        """
         word_to_ix = {}
         for walk in walks:
             for word in walk:
@@ -417,6 +423,16 @@ class PathwayMetapath2vec(Embedder):
 
         vocab_size = len(word_to_ix)
         self.vocab = word_to_ix
+
+        # encode walks once as int arrays (reused across epochs)
+        ix_walks = [
+            np.fromiter((word_to_ix[w] for w in walk), dtype=np.int64, count=len(walk))
+            for walk in walks
+        ]
+
+        # precompute context offsets ex. [-5,-4,-3,-2,-1,1,2,3,4,5]
+        offsets = np.arange(-window_size, window_size + 1)
+        offsets = offsets[offsets != 0]
 
         class SkipGram(torch.nn.Module):
             def __init__(self, vocab_size, embedding_dim):
@@ -432,44 +448,71 @@ class PathwayMetapath2vec(Embedder):
         model = SkipGram(vocab_size, dimensions)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-        # build training pairs
-        training_data = []
-        for walk in walks:
-            for i, word in enumerate(walk):
-                target_ix = word_to_ix[word]
-                ctx_start = max(0, i - window_size)
-                ctx_end = min(len(walk), i + window_size + 1)
-                for j in range(ctx_start, ctx_end):
-                    if j != i:
-                        training_data.append((target_ix, word_to_ix[walk[j]]))
+        def _pairs_for_walk(walk):
+            # vectorized window extraction, returns (targets, contexts) int arrays
+            L = walk.shape[0]
+            if L < 2:
+                return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+            pos = np.arange(L)
+            ctx_pos = pos[:, None] + offsets[None, :]
+            valid = (ctx_pos >= 0) & (ctx_pos < L)
+            clipped = np.clip(ctx_pos, 0, L - 1)
+            tgt = np.broadcast_to(walk[:, None], (L, offsets.size))[valid]
+            ctx = walk[clipped][valid]
+            return tgt, ctx
 
-        batch_size = 1024
-        n_neg = 5
+        def _train_batch(tgt_np, ctx_np):
+            targets = torch.from_numpy(tgt_np)
+            contexts = torch.from_numpy(ctx_np)
+            neg = torch.from_numpy(
+                np.random.randint(0, vocab_size, size=(tgt_np.shape[0], n_neg),
+                                  dtype=np.int64)
+            )
+            optimizer.zero_grad()
+            pos_score = torch.nn.functional.logsigmoid(model(targets, contexts))
+            neg_score = sum(
+                torch.nn.functional.logsigmoid(-model(targets, neg[:, j]))
+                for j in range(n_neg)
+            )
+            loss = -torch.mean(pos_score + neg_score)
+            loss.backward()
+            optimizer.step()
+            return loss.item()
+
+        walk_order = np.arange(len(ix_walks))
         for epoch in range(epochs):
-            total_loss = 0
-            random.shuffle(training_data)
+            total_loss = 0.0
+            n_batches = 0
+            np.random.shuffle(walk_order)
 
-            for i in range(0, len(training_data), batch_size):
-                batch = training_data[i:i + batch_size]
-                targets = torch.LongTensor([p[0] for p in batch])
-                contexts = torch.LongTensor([p[1] for p in batch])
-                neg = torch.LongTensor(
-                    np.random.choice(vocab_size, size=(len(batch), n_neg)).tolist()
-                )
+            # process walks in chunks to amortize vectorization
+            for chunk_start in range(0, len(walk_order), walks_per_chunk):
+                chunk_idx = walk_order[chunk_start:chunk_start + walks_per_chunk]
+                tgts, ctxs = [], []
+                for wi in chunk_idx:
+                    t, c = _pairs_for_walk(ix_walks[wi])
+                    if t.size:
+                        tgts.append(t)
+                        ctxs.append(c)
+                if not tgts:
+                    continue
+                tgt_all = np.concatenate(tgts)
+                ctx_all = np.concatenate(ctxs)
 
-                optimizer.zero_grad()
-                pos_score = torch.nn.functional.logsigmoid(model(targets, contexts))
-                neg_score = sum(
-                    torch.nn.functional.logsigmoid(-model(targets, neg[:, j]))
-                    for j in range(n_neg)
-                )
-                loss = -torch.mean(pos_score + neg_score)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
+                # shuffle pairs within chunk, then iterate batches
+                perm = np.random.permutation(tgt_all.shape[0])
+                tgt_all = tgt_all[perm]
+                ctx_all = ctx_all[perm]
 
-            n_batches = max(1, len(training_data) // batch_size)
-            print(f"epoch {epoch + 1}/{epochs}, loss: {total_loss / n_batches:.4f}")
+                for i in range(0, tgt_all.shape[0], batch_size):
+                    total_loss += _train_batch(
+                        tgt_all[i:i + batch_size],
+                        ctx_all[i:i + batch_size],
+                    )
+                    n_batches += 1
+
+            print(f"epoch {epoch + 1}/{epochs}, loss: "
+                  f"{total_loss / max(1, n_batches):.4f}, batches: {n_batches}")
 
         self.model = model
         with torch.no_grad():
