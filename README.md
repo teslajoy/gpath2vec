@@ -1,5 +1,8 @@
 # gpath2vec
 
+![Status](https://img.shields.io/badge/Status-Build%20Passing-lgreen)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 a python package for converting gene sets to biological pathway embeddings with enrichment analysis attributes.
 
 gene sets (from clusters, niches, studies) are tested against reactome pathways via fisher's exact test, then embedded into a shared vector space using metapath2vec over the pathway hierarchy graph.
