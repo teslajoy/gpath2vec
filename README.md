@@ -249,6 +249,10 @@ gpath2vec niche-pipeline ... --reactome-dir /shared/path/reactome_cache
 # or: export GPATH2VEC_REACTOME_DIR=/shared/path/reactome_cache
 ```
 
+## reproducibility
+
+all stochastic embedders (metapath2vec, line, vae) take a `seed` (default 1234) that pins the python, numpy and torch rngs, so embeddings are bit-reproducible run to run. the seed is re-applied before training (independent of walk-generation rng) and recorded in `run_provenance.json`. svd and spectral are deterministic by construction. cli: `--seed`.
+
 ## todo
 
 - **edge2vec**: edge-type transition-matrix biased walks as an embedding method.

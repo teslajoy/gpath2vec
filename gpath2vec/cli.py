@@ -22,14 +22,16 @@ from gpath2vec.aucell import compute_aucell, topk_per_niche
 METHODS = ["metapath2vec", "svd", "spectral", "line", "vae"]
 
 
-def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr, window):
+def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr,
+                  window, seed=1234):
     """run the selected embedding method, return embeddings dict."""
     if method == "metapath2vec":
-        embedder = PathwayMetapath2vec(graph=graph, name=study_id)
+        embedder = PathwayMetapath2vec(graph=graph, name=study_id, seed=seed)
         walks = embedder.model
         click.echo(f"{len(walks)} random walks")
         embedder.train_embeddings(walks=walks, dimensions=dimensions,
-                                  window_size=window, epochs=epochs, lr=lr)
+                                  window_size=window, epochs=epochs, lr=lr,
+                                  seed=seed)
     elif method == "svd":
         if ea_mat is None:
             raise click.UsageError("svd requires an ea matrix (run enrichment first)")
@@ -37,11 +39,13 @@ def _run_embedder(method, graph, ea_mat, study_id, dimensions, epochs, lr, windo
     elif method == "spectral":
         embedder = SpectralGraphEmbedder(graph, dimensions=dimensions)
     elif method == "line":
-        embedder = LINEEmbedder(graph, dimensions=dimensions, epochs=epochs, lr=lr)
+        embedder = LINEEmbedder(graph, dimensions=dimensions, epochs=epochs,
+                                lr=lr, seed=seed)
     elif method == "vae":
         if ea_mat is None:
             raise click.UsageError("vae requires an ea matrix (run enrichment first)")
-        embedder = VAEEmbedder(ea_mat, dimensions=dimensions, epochs=epochs, lr=lr)
+        embedder = VAEEmbedder(ea_mat, dimensions=dimensions, epochs=epochs,
+                               lr=lr, seed=seed)
     else:
         raise click.UsageError(f"unknown method: {method}")
 
@@ -188,10 +192,13 @@ def create_network(enrichment_path, study_id, level, gene_filter, weight, digrap
 @click.option("--window", default=5, show_default=True)
 @click.option("--epochs", default=10, show_default=True)
 @click.option("--lr", default=0.005, show_default=True)
+@click.option("--seed", default=1234, show_default=True, type=int,
+              help="rng seed for reproducible embeddings")
 @click.option("--out-path", required=True, help="output path (pickle)")
 @click.option("--save-model", required=False, help="optional model save path")
 def generate_embeddings(network_path, ea_matrix_path, method, study_id,
-                        dimensions, window, epochs, lr, out_path, save_model):
+                        dimensions, window, epochs, lr, seed, out_path,
+                        save_model):
     """generate embeddings from network (metapath2vec, svd, spectral, line)"""
     import pandas as pd
 
@@ -206,7 +213,7 @@ def generate_embeddings(network_path, ea_matrix_path, method, study_id,
         ea_mat = pd.read_csv(ea_matrix_path, index_col=0)
 
     embedder = _run_embedder(method, net.graph, ea_mat, study_id,
-                             dimensions, epochs, lr, window)
+                             dimensions, epochs, lr, window, seed)
     embeddings = embedder.get_embeddings()
     click.echo(f"embeddings for {len(embeddings)} nodes")
 
@@ -239,8 +246,10 @@ def generate_embeddings(network_path, ea_matrix_path, method, study_id,
 @click.option("--window", default=5, show_default=True)
 @click.option("--epochs", default=10, show_default=True)
 @click.option("--lr", default=0.005, show_default=True)
+@click.option("--seed", default=1234, show_default=True, type=int,
+              help="rng seed for reproducible embeddings")
 def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
-                 weight, method, dimensions, window, epochs, lr):
+                 weight, method, dimensions, window, epochs, lr, seed):
     """run the full pipeline: enrichment -> network -> embeddings"""
     study_id = _make_id(study_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -291,7 +300,7 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
     # embeddings
     click.echo(f"step 3: embeddings ({method})")
     embedder = _run_embedder(method, net.graph, matrix, study_id,
-                             dimensions, epochs, lr, window)
+                             dimensions, epochs, lr, window, seed)
     embeddings = embedder.get_embeddings()
     with open(embeddings_path, "wb") as f:
         pickle.dump(embeddings, f)
@@ -370,12 +379,14 @@ def _niche_row(X, i):
 @click.option("--dimensions", default=512, show_default=True, type=int)
 @click.option("--epochs", default=5, show_default=True, type=int)
 @click.option("--lr", default=0.005, show_default=True, type=float)
+@click.option("--seed", default=1234, show_default=True, type=int,
+              help="rng seed for reproducible walks + embeddings")
 @click.option("--study-id", default=None)
 def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
                    reactome_dir, enrichment_method, reactome_level,
                    gene_filter_file, min_genes, max_genes, top_genes,
                    n_jobs, topk, pre_normalized, dimensions, epochs, lr,
-                   study_id):
+                   seed, study_id):
     """niche expression -> enrichment (fisher|aucell) -> graph -> embeddings.
 
     fisher: per-niche top-N expressed genes -> Fisher's exact vs Reactome,
@@ -432,7 +443,8 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
                   level=reactome_level, gene_filter=gene_filter,
                   clusters=clusters if clusters else None)
         embedder = PathwayMetapath2vec(graph=net.graph, name=study_id,
-                                       walks_per_node=10, walk_length=100)
+                                       walks_per_node=10, walk_length=100,
+                                       seed=seed)
     else:  # aucell
         scores = compute_aucell(
             X, genes, niche_ids, level=reactome_level,
@@ -447,7 +459,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
                   node_typing="uniform")
         embedder = PathwayMetapath2vec(
             graph=net.graph, name=study_id, walks_per_node=10,
-            walk_length=100,
+            walk_length=100, seed=seed,
             metapaths=[["cluster", "pathway", "pathway"],
                        ["pathway", "pathway", "pathway"]])
 
@@ -459,7 +471,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
     net.save(os.path.join(out_dir, "network.pkl"))
 
     embedder.train_embeddings(walks=embedder.model, dimensions=dimensions,
-                              window_size=5, epochs=epochs, lr=lr)
+                              window_size=5, epochs=epochs, lr=lr, seed=seed)
     embeddings = embedder.get_embeddings()
     with open(os.path.join(out_dir, "embeddings.pkl"), "wb") as f:
         pickle.dump(embeddings, f)
@@ -487,6 +499,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
         "top_genes_fisher": top_genes, "topk_aucell": topk,
         "pre_normalized": pre_normalized,
         "dimensions": dimensions, "epochs": epochs, "lr": lr,
+        "seed": seed,
         "n_niches": len(niche_ids), "n_genes": len(genes),
     }
     Path(os.path.join(out_dir, "run_provenance.json")).write_text(

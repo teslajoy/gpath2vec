@@ -9,6 +9,13 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.manifold import SpectralEmbedding as SklearnSpectral
 
 
+def _set_seed(seed):
+    # pin python, numpy and torch global rngs so embeddings are bit-reproducible.
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
 class Embedder:
     """base class for all embedding methods."""
 
@@ -45,18 +52,20 @@ class VAEEmbedder(Embedder):
     """
 
     def __init__(self, ea_matrix, dimensions=512, hidden_dim=256,
-                 epochs=50, lr=0.001, beta=1.0):
+                 epochs=50, lr=0.001, beta=1.0, seed=1234):
         self.ea_matrix = ea_matrix
         self.dimensions = dimensions
         self.hidden_dim = hidden_dim
         self.epochs = epochs
         self.lr = lr
         self.beta = beta
+        self.seed = seed
         self.latent_means = {}
         self.latent_vars = {}
         super().__init__()
 
     def method(self):
+        _set_seed(self.seed)
         input_dim = self.ea_matrix.shape[1]
         X = torch.FloatTensor(self.ea_matrix.values)
         names = list(self.ea_matrix.index)
@@ -229,16 +238,19 @@ class LINEEmbedder(Embedder):
     neg_samples: negative samples per positive
     """
 
-    def __init__(self, graph, dimensions=512, epochs=15, lr=0.005, neg_samples=5):
+    def __init__(self, graph, dimensions=512, epochs=15, lr=0.005,
+                 neg_samples=5, seed=1234):
         self.graph = graph
         self.dimensions = dimensions
         self.epochs = epochs
         self.lr = lr
         self.neg_samples = neg_samples
+        self.seed = seed
         self.vocab = {}
         super().__init__()
 
     def method(self):
+        _set_seed(self.seed)
         nodes = list(self.graph.nodes())
         node_to_ix = {n: i for i, n in enumerate(nodes)}
         self.vocab = node_to_ix
@@ -343,11 +355,12 @@ class LINEEmbedder(Embedder):
 
 class PathwayMetapath2vec(Embedder):
     def __init__(self, graph, name, walks_per_node=10, walk_length=100,
-                 metapaths=None):
+                 metapaths=None, seed=1234):
         self.graph = graph
         self.name = name
         self.walks_per_node = walks_per_node
         self.walk_length = walk_length
+        self.seed = seed
         # None -> the default 6 sig/notsig schemas (unchanged behavior).
         # pass an explicit list for connectivity-typed graphs, ex.
         # [["cluster","pathway","pathway"], ["pathway","pathway","pathway"]].
@@ -384,7 +397,7 @@ class PathwayMetapath2vec(Embedder):
         ]
 
         walks = []
-        random.seed(1234)
+        _set_seed(self.seed)
 
         for _ in range(self.walks_per_node):
             for start_node in self.graph.nodes():
@@ -414,12 +427,17 @@ class PathwayMetapath2vec(Embedder):
         return walks
 
     def train_embeddings(self, walks, dimensions=512, window_size=5, epochs=10,
-                         lr=0.025, batch_size=1024, n_neg=5, walks_per_chunk=5000):
+                         lr=0.025, batch_size=1024, n_neg=5, walks_per_chunk=5000,
+                         seed=None):
         """
         skip-gram with negative sampling. streams (target, context) pairs per
         chunk of walks instead of materializing every pair upfront, so memory
         stays O(chunk) rather than O(all pairs).
+
+        seed defaults to the value passed at construction; re-seeding here makes
+        training independent of how much rng was consumed during walk generation.
         """
+        _set_seed(self.seed if seed is None else seed)
         word_to_ix = {}
         for walk in walks:
             for word in walk:
