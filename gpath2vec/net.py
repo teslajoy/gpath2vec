@@ -32,13 +32,17 @@ class Net:
 
     def __init__(self, enrichment=None, id="study", digraph=False,
                  induce=False, level="all", gene_filter=None,
-                 clusters=None):
+                 clusters=None, node_typing="sig"):
         self.enrichment = enrichment or []
         self.digraph = digraph
         self.induce = induce
         self.id = id
         self.level = level
         self.gene_filter = gene_filter
+        # "sig" (default): pathway nodes typed sig/notsig from enrichment FDR
+        # (unchanged behavior). "uniform": every pathway node typed "pathway",
+        # no FDR dependence, for connectivity-typed (ex. AUCell) graphs.
+        self.node_typing = node_typing
         self.pathway_relations = fetch_human_hierarchy()
         self.pathway_stids = set(chain(*self.pathway_relations))
         self.graph = self._build_graph()
@@ -70,6 +74,22 @@ class Net:
         return G
 
     def _set_node_attr(self):
+        if self.node_typing == "uniform":
+            # connectivity-typed graph: every node present at this point is a
+            # pathway node (clusters are added afterwards). no sig/notsig, no
+            # FDR. simplified metapaths walk on this single "pathway" type.
+            nx.set_node_attributes(self.graph,
+                                   utils.pathway_parent_mappings(),
+                                   "parent_pathway")
+            nx.set_node_attributes(self.graph,
+                                   utils.pathway_name_mappings(),
+                                   "pathway_name")
+            nx.set_node_attributes(self.graph, {
+                n: {"node_type": "pathway", "stId": n}
+                for n in self.graph.nodes()
+            })
+            return
+
         fdr_vals = self.fdr_values
         id_keys = self.ea_stids
 

@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 setup(
     name="gpath2vec",
@@ -13,7 +13,7 @@ setup(
     author="Nasim Sanati",
     author_email="nasim@plenary.org",
     license="MIT",
-    python_requires=">=3.9",
+    python_requires=">=3.14",
     install_requires=[
         "torch",
         "networkx",
@@ -25,6 +25,10 @@ setup(
         "statsmodels",
         "scikit-learn",
     ],
+    extras_require={
+        "test": ["pytest"],
+        "aucell": ["decoupler>=2.1", "anndata"],
+    },
     entry_points={
         "console_scripts": [
             "gpath2vec=gpath2vec.cli:main",
@@ -36,11 +40,6 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",

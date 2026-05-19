@@ -342,11 +342,16 @@ class LINEEmbedder(Embedder):
 
 
 class PathwayMetapath2vec(Embedder):
-    def __init__(self, graph, name, walks_per_node=10, walk_length=100):
+    def __init__(self, graph, name, walks_per_node=10, walk_length=100,
+                 metapaths=None):
         self.graph = graph
         self.name = name
         self.walks_per_node = walks_per_node
         self.walk_length = walk_length
+        # None -> the default 6 sig/notsig schemas (unchanged behavior).
+        # pass an explicit list for connectivity-typed graphs, ex.
+        # [["cluster","pathway","pathway"], ["pathway","pathway","pathway"]].
+        self.metapaths = metapaths
         self.vocab = {}
         super().__init__()
 
@@ -369,7 +374,7 @@ class PathwayMetapath2vec(Embedder):
         print(f"graph: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
         node_types = nx.get_node_attributes(self.graph, "node_type")
 
-        metapaths = [
+        metapaths = self.metapaths if self.metapaths else [
             ["sig", "sig"],
             ["sig", "notsig", "sig"],
             ["notsig", "sig", "notsig"],

@@ -89,28 +89,11 @@ def filter_pathways(level="all", gene_filter=None, min_genes=3):
     return gm
 
 
-def enrich(gene_sets, level="low", gene_filter=None, min_genes=3):
-    """
-    fisher's exact test per gene-set/pathway pair with fdr correction.
-
-    gene_sets: {name: [genes]}
-    level: high/mid/low/all
-    gene_filter: optional set of genes to restrict pathway universe
-    min_genes: minimum pathway size to include
-    returns: dataframe with cluster, stId, name, oddsratio, pvalue, fdr_bh
-    """
-    gm = filter_pathways(level=level, gene_filter=gene_filter, min_genes=min_genes)
-    if gm.empty:
-        return pd.DataFrame()
-
-    universe = sorted(set(g for genes in gm.genes for g in genes))
-    u_set = set(universe)
-    pw_genes = {row.stId: set(row.genes) & u_set for _, row in gm.iterrows()}
-    n_pw = len(pw_genes)
-    n_universe = len(universe)
-
-    results = []
-    for cname, cgenes in gene_sets.items():
+def _enrich_chunk(items, u_set, pw_genes, n_universe, n_pw):
+    """fisher + per-cluster BH-FDR for a chunk of (cname, cgenes). pure;
+    output order == input order, so parallel == serial bit-identically."""
+    out = []
+    for cname, cgenes in items:
         cset = set(cgenes) & u_set
         c_in = len(cset)
         c_out = n_universe - c_in
@@ -132,11 +115,67 @@ def enrich(gene_sets, level="low", gene_filter=None, min_genes=3):
         edf["sig_pathway"] = corrected[0]
         edf["pathway_adjpvalue"] = -np.log10(edf.fdr_bh) / n_pw
         edf.fillna(value={"pathway_adjpvalue": 1}, inplace=True)
-        results.append(edf)
+        out.append(edf)
+    return out
+
+
+def enrich(gene_sets, level="low", gene_filter=None, min_genes=3, n_jobs=1):
+    """
+    fisher's exact test per gene-set/pathway pair with fdr correction.
+
+    gene_sets: {name: [genes]}
+    level: high/mid/low/all
+    gene_filter: optional set of genes to restrict pathway universe
+    min_genes: minimum pathway size to include
+    n_jobs: 1 = serial (default, unchanged behavior); >1 or -1 parallelizes
+            the per-cluster loop. order-preserving, so the result is
+            bit-identical to the serial path.
+    returns: dataframe with cluster, stId, name, oddsratio, pvalue, fdr_bh
+    """
+    gm = filter_pathways(level=level, gene_filter=gene_filter, min_genes=min_genes)
+    if gm.empty:
+        return pd.DataFrame()
+
+    universe = sorted(set(g for genes in gm.genes for g in genes))
+    u_set = set(universe)
+    pw_genes = {row.stId: set(row.genes) & u_set for _, row in gm.iterrows()}
+    n_pw = len(pw_genes)
+    n_universe = len(universe)
+
+    items = list(gene_sets.items())
+    if n_jobs == 1 or len(items) <= 1:
+        results = _enrich_chunk(items, u_set, pw_genes, n_universe, n_pw)
+    else:
+        from joblib import Parallel, delayed, cpu_count
+        nj = cpu_count() if n_jobs == -1 else n_jobs
+        k = max(1, -(-len(items) // (nj * 4)))  # ~4 chunks/worker
+        chunks = [items[i:i + k] for i in range(0, len(items), k)]
+        nested = Parallel(n_jobs=n_jobs)(
+            delayed(_enrich_chunk)(ch, u_set, pw_genes, n_universe, n_pw)
+            for ch in chunks)
+        results = [edf for sub in nested for edf in sub]
 
     ea_df = pd.concat(results, ignore_index=True)
     ea_df["name"] = ea_df.stId.map(gm.set_index("stId")["name"])
     return ea_df
+
+
+def aggregate_min_fdr(ea_records):
+    """min-FDR per pathway across all niches; the correct sig/notsig basis.
+
+    accepts records in either shape:
+      - {"stId": ..., "fdr_bh": ...}                (long-form ea_df rows)
+      - {"stId": ..., "entities": {"fdr": ...}}     (Net.enrichment format)
+    pandas Series rows (from ea_df.iterrows()) also work via .get().
+    returns records in Net.enrichment format.
+    """
+    best = {}
+    for r in ea_records:
+        stid = r["stId"]
+        fdr = r.get("fdr_bh", r.get("entities", {}).get("fdr", 1.0))
+        if stid not in best or fdr < best[stid]:
+            best[stid] = fdr
+    return [{"stId": s, "entities": {"fdr": f}} for s, f in best.items()]
 
 
 def ea_matrix(ea_df, weight="fdr", sig_only=True):

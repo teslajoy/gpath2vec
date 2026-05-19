@@ -175,3 +175,6 @@ cython_debug/
 
 .idea
 scripts/
+paper_draft.*
+TODO.md
+arm_topology_A_B_C.png

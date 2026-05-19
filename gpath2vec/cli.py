@@ -7,13 +7,17 @@ from pathlib import Path
 from datetime import datetime
 
 import click
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
 
-from gpath2vec.ea import enrich, ea_matrix
+from gpath2vec.ea import enrich, ea_matrix, aggregate_min_fdr
 from gpath2vec.net import Net
 from gpath2vec.embedder import (
     PathwayMetapath2vec, SVDEmbedder, SpectralGraphEmbedder,
     LINEEmbedder, VAEEmbedder
 )
+from gpath2vec.aucell import compute_aucell, topk_per_niche
 
 METHODS = ["metapath2vec", "svd", "spectral", "line", "vae"]
 
@@ -145,15 +149,8 @@ def create_network(enrichment_path, study_id, level, gene_filter, weight, digrap
     with open(enrichment_path) as f:
         ea_records = json.load(f)
 
-    # build enrichment list for Net
-    enrichment = []
-    seen = set()
-    for r in ea_records:
-        stid = r["stId"]
-        if stid not in seen:
-            fdr = r.get("fdr_bh", r.get("entities", {}).get("fdr", 1.0))
-            enrichment.append({"stId": stid, "entities": {"fdr": fdr}})
-            seen.add(stid)
+    # min-fdr per pathway across all niches
+    enrichment = aggregate_min_fdr(ea_records)
 
     # build cluster dict from ea records
     clusters = {}
@@ -274,13 +271,7 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
 
     # network
     click.echo("step 2: network")
-    enrichment = []
-    seen = set()
-    for r in records:
-        stid = r["stId"]
-        if stid not in seen:
-            enrichment.append({"stId": stid, "entities": {"fdr": r["fdr_bh"]}})
-            seen.add(stid)
+    enrichment = aggregate_min_fdr(records)
 
     clusters = {}
     for r in records:
@@ -313,6 +304,194 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
     click.echo(f"  embeddings: {embeddings_path}")
     click.echo(f"  model: {model_path}")
 
+
+
+def _load_gene_filter(path):
+    """JSON list of gene symbols, or a dict with one list value."""
+    obj = json.loads(Path(path).read_text())
+    if isinstance(obj, list):
+        return set(map(str, obj))
+    if isinstance(obj, dict):
+        for k in ("genes", "tf_genes"):
+            if isinstance(obj.get(k), list):
+                return set(map(str, obj[k]))
+        lists = [v for v in obj.values() if isinstance(v, list)]
+        if len(lists) == 1:
+            return set(map(str, lists[0]))
+    raise click.ClickException(
+        f"--gene-filter {path}: expected a JSON list of gene symbols "
+        f"or a dict with one list value")
+
+
+def _niche_row(X, i):
+    """dense 1-D expression vector for niche row i (sparse or dense X)."""
+    r = X[i]
+    if sp.issparse(r):
+        return np.asarray(r.todense()).ravel()
+    return np.asarray(r).ravel()
+
+
+@cli.command("niche-pipeline")
+@click.option("--niche-matrix", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="niche x gene matrix: .npz (scipy sparse) or .npy (dense)")
+@click.option("--genes", "genes_path", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help=".npy of gene symbols aligned to matrix columns")
+@click.option("--niche-meta", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="parquet with column 'niche_id' (+ optional subarray, patient)")
+@click.option("--out-dir", required=True, type=click.Path(file_okay=False))
+@click.option("--reactome-dir", default=None,
+              type=click.Path(exists=True, file_okay=False),
+              help="reactome cache dir. REQUIRED on offline/HPC nodes; else "
+                   "GPATH2VEC_REACTOME_DIR env or ~/.gpath2vec/cache")
+@click.option("--enrichment", "enrichment_method", default="fisher",
+              show_default=True, type=click.Choice(["fisher", "aucell"]))
+@click.option("--reactome-level", default="low", show_default=True,
+              type=click.Choice(["low", "mid", "high", "all"]))
+@click.option("--gene-filter", "gene_filter_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="optional JSON gene-symbol list restricting the pathway "
+                   "universe (off = full universe)")
+@click.option("--min-genes", default=3, show_default=True, type=int)
+@click.option("--max-genes", default=500, show_default=True, type=int,
+              help="aucell: pathway gene-set size upper band")
+@click.option("--top-genes", default=100, show_default=True, type=int,
+              help="fisher: per-niche top-N expressed marker genes")
+@click.option("--n-jobs", default=-1, show_default=True, type=int,
+              help="fisher: parallel enrichment workers (-1 = all cores)")
+@click.option("--topk", default=50, show_default=True, type=int,
+              help="aucell: per-niche pathways kept (ablate 20/50/100)")
+@click.option("--pre-normalized/--normalize", default=False,
+              show_default=True,
+              help="aucell: --normalize (default) applies "
+                   "normalize_total(1e4)+log1p; --pre-normalized skips it")
+@click.option("--dimensions", default=512, show_default=True, type=int)
+@click.option("--epochs", default=5, show_default=True, type=int)
+@click.option("--lr", default=0.005, show_default=True, type=float)
+@click.option("--study-id", default=None)
+def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
+                   reactome_dir, enrichment_method, reactome_level,
+                   gene_filter_file, min_genes, max_genes, top_genes,
+                   n_jobs, topk, pre_normalized, dimensions, epochs, lr,
+                   study_id):
+    """niche expression -> enrichment (fisher|aucell) -> graph -> embeddings.
+
+    fisher: per-niche top-N expressed genes -> Fisher's exact vs Reactome,
+    sig/notsig metapaths. aucell: full-ranking AUCell per niche -> per-niche
+    top-k pathways as connectivity-typed edges, simplified metapaths. all
+    paths are arguments; a provenance JSON is written for reproducibility.
+    """
+    if reactome_dir:
+        os.environ["GPATH2VEC_REACTOME_DIR"] = os.path.abspath(reactome_dir)
+    study_id = _make_id(study_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    mp = str(niche_matrix)
+    if mp.endswith(".npz"):
+        X = sp.load_npz(mp)
+    elif mp.endswith(".npy"):
+        X = np.load(mp, allow_pickle=False)
+    else:
+        raise click.ClickException(
+            "--niche-matrix must be .npz (scipy sparse) or .npy (dense)")
+    genes = np.load(genes_path, allow_pickle=True)
+    meta = pd.read_parquet(niche_meta)
+    if "niche_id" not in meta.columns:
+        raise click.ClickException("--niche-meta must have a 'niche_id' column")
+    niche_ids = meta["niche_id"].astype(str).tolist()
+    if X.shape != (len(niche_ids), len(genes)):
+        raise click.ClickException(
+            f"shape mismatch: matrix {X.shape} vs "
+            f"(n_niches={len(niche_ids)}, n_genes={len(genes)})")
+    gene_filter = _load_gene_filter(gene_filter_file) if gene_filter_file else None
+    click.echo(f"niche-pipeline: {len(niche_ids)} niches, {len(genes)} genes, "
+               f"enrichment={enrichment_method}, level={reactome_level}")
+
+    if enrichment_method == "fisher":
+        gene_sets = {}
+        for i, nid in enumerate(niche_ids):
+            row = _niche_row(X, i)
+            if (row > 0).sum() == 0:
+                continue
+            top = np.argsort(row)[-top_genes:]
+            top = top[row[top] > 0]
+            gene_sets[str(nid)] = list(map(str, genes[top]))
+        click.echo(f"  {len(gene_sets)} niches with genes -> enrichment")
+        ea_df = enrich(gene_sets, level=reactome_level,
+                       gene_filter=gene_filter, min_genes=min_genes,
+                       n_jobs=n_jobs)
+        ea_df.to_parquet(os.path.join(out_dir, "enrichment.parquet"))
+        clusters = {}
+        for _, r in ea_df[ea_df.sig_pathway].iterrows():
+            clusters.setdefault(str(r["cluster"]), {})[r["stId"]] = \
+                1 - r["fdr_bh"]
+        enrichment = aggregate_min_fdr(ea_df.to_dict("records"))
+        net = Net(enrichment=enrichment, id=study_id, digraph=True,
+                  level=reactome_level, gene_filter=gene_filter,
+                  clusters=clusters if clusters else None)
+        embedder = PathwayMetapath2vec(graph=net.graph, name=study_id,
+                                       walks_per_node=10, walk_length=100)
+    else:  # aucell
+        scores = compute_aucell(
+            X, genes, niche_ids, level=reactome_level,
+            gene_filter=gene_filter, min_genes=min_genes,
+            max_genes=max_genes, normalize=not pre_normalized,
+            provenance_path=os.path.join(out_dir, "aucell_params.json"))
+        scores.to_parquet(os.path.join(out_dir, "aucell_scores.parquet"))
+        clusters = topk_per_niche(scores, topk)
+        net = Net(enrichment=[], id=study_id, digraph=True,
+                  level=reactome_level, gene_filter=gene_filter,
+                  clusters=clusters if clusters else None,
+                  node_typing="uniform")
+        embedder = PathwayMetapath2vec(
+            graph=net.graph, name=study_id, walks_per_node=10,
+            walk_length=100,
+            metapaths=[["cluster", "pathway", "pathway"],
+                       ["pathway", "pathway", "pathway"]])
+
+    g = net.graph
+    n_clust = sum(1 for _, a in g.nodes(data=True)
+                  if a.get("node_type") == "cluster")
+    click.echo(f"  network: {g.number_of_nodes()} nodes, "
+               f"{g.number_of_edges()} edges, {n_clust} niches")
+    net.save(os.path.join(out_dir, "network.pkl"))
+
+    embedder.train_embeddings(walks=embedder.model, dimensions=dimensions,
+                              window_size=5, epochs=epochs, lr=lr)
+    embeddings = embedder.get_embeddings()
+    with open(os.path.join(out_dir, "embeddings.pkl"), "wb") as f:
+        pickle.dump(embeddings, f)
+    embedder.save_model(os.path.join(out_dir, "model.pt"))
+
+    cluster_emb = {k: v for k, v in embeddings.items()
+                   if isinstance(k, str) and k.startswith("cluster_")}
+    if cluster_emb:
+        emb_df = pd.DataFrame(cluster_emb).T
+        emb_df.index = [i.replace("cluster_", "", 1) for i in emb_df.index]
+        m = meta.set_index(meta["niche_id"].astype(str))
+        for col in ("subarray", "patient"):
+            if col in meta.columns:
+                emb_df[col] = emb_df.index.map(m[col].to_dict())
+        emb_df.to_parquet(
+            os.path.join(out_dir, "cluster_embeddings.parquet"))
+
+    prov = {
+        "study_id": study_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "enrichment_method": enrichment_method,
+        "reactome_level": reactome_level,
+        "gene_filter_applied": gene_filter is not None,
+        "min_genes": min_genes, "max_genes": max_genes,
+        "top_genes_fisher": top_genes, "topk_aucell": topk,
+        "pre_normalized": pre_normalized,
+        "dimensions": dimensions, "epochs": epochs, "lr": lr,
+        "n_niches": len(niche_ids), "n_genes": len(genes),
+    }
+    Path(os.path.join(out_dir, "run_provenance.json")).write_text(
+        json.dumps(prov, indent=2))
+    click.echo(f"done. output in {out_dir}")
 
 
 def main():

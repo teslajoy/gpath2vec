@@ -4,6 +4,8 @@ a python package for converting gene sets to biological pathway embeddings with 
 
 gene sets (from clusters, niches, studies) are tested against reactome pathways via fisher's exact test, then embedded into a shared vector space using metapath2vec over the pathway hierarchy graph.
 
+enrichment is either fisher's exact (a binary top-N gene set per cluster/niche) or **niche-level AUCell** (the full per-niche expression ranking, no gene-set selection step). AUCell here scores each niche's **aggregated pseudobulk** profile, one score per (niche, pathway); it is **not single-cell AUCell** (the package never sees individual cells, niche construction is upstream). both enrichment sources feed the same reactome hierarchy graph and metapath2vec embedding.
+
 ![gpath2vec.png](./img/gpath2vec.png)
 
 ## pipeline
@@ -89,7 +91,8 @@ the result is a shared embedding space where:
 ## install
 
 ```bash
-pip install -e .
+pip install -e .            # fisher enrichment path
+pip install -e '.[aucell]'  # adds the niche-level AUCell path (decoupler, anndata)
 ```
 
 ## usage
@@ -166,6 +169,17 @@ gpath2vec embeddings --network-path net.pkl --method vae --ea-matrix-path ea_mat
 
 # full pipeline with method choice
 gpath2vec end2end --genes "EGFR,EGF" --level low --method vae --output-dir output/
+
+# niche pipeline: enrichment -> graph -> embeddings in one command.
+# --enrichment fisher : binary top-N gene set per niche, fisher's exact + fdr.
+# --enrichment aucell : niche-level AUCell on each niche's aggregated pseudobulk
+#                       (one score per niche, NOT single-cell), per-niche top-k as edges.
+# inputs: --niche-matrix (niches x genes .npz/.npy), --genes (.npy gene order),
+#         --niche-meta (parquet with a niche_id column).
+gpath2vec niche-pipeline \
+  --niche-matrix niches.npz --genes genes.npy --niche-meta niche_meta.parquet \
+  --enrichment aucell --reactome-level low --topk 50 \
+  --reactome-dir /path/to/reactome/cache --out-dir output/
 ```
 
 ## embedding methods
@@ -219,3 +233,23 @@ reactome data is downloaded once and cached to `~/.gpath2vec/cache/`. set `GPATH
 ```bash
 export GPATH2VEC_REACTOME_DIR=/path/to/reactome/files
 ```
+
+### offline / hpc (air-gapped compute nodes)
+
+clusters like ARC have no internet on compute nodes, so the cache must be staged from a node that does have internet (ex. a login node):
+
+```bash
+./pull_reactome_cache.sh /shared/path/reactome_cache   # run where there IS internet
+```
+
+this drives the package's real fetchers, so the cache matches exactly what gpath2vec expects. on the compute node, point at it without re-downloading:
+
+```bash
+gpath2vec niche-pipeline ... --reactome-dir /shared/path/reactome_cache
+# or: export GPATH2VEC_REACTOME_DIR=/shared/path/reactome_cache
+```
+
+## todo
+
+- **edge2vec**: edge-type transition-matrix biased walks as an embedding method.
+- **lorentz (hyperbolic) pipeline**
