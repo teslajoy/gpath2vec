@@ -248,17 +248,33 @@ def generate_embeddings(network_path, ea_matrix_path, method, study_id,
 @click.option("--lr", default=0.005, show_default=True)
 @click.option("--seed", default=1234, show_default=True, type=int,
               help="rng seed for reproducible embeddings")
+@click.option("--n-jobs", default=1, show_default=True, type=int,
+              help="parallel enrichment workers (order-preserving)")
+@click.option("--reactome-dir", default=None,
+              help="reactome cache dir (sets GPATH2VEC_REACTOME_DIR)")
+@click.option("--meta", "meta_path", default=None,
+              help="optional parquet to join into cluster embeddings; "
+                   "all non-key columns are joined")
+@click.option("--meta-key", default="cluster", show_default=True,
+              help="key column in --meta matching cluster names")
 def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
-                 weight, method, dimensions, window, epochs, lr, seed):
+                 weight, method, dimensions, window, epochs, lr, seed,
+                 n_jobs, reactome_dir, meta_path, meta_key):
     """run the full pipeline: enrichment -> network -> embeddings"""
+    if reactome_dir:
+        os.environ["GPATH2VEC_REACTOME_DIR"] = os.path.abspath(reactome_dir)
     study_id = _make_id(study_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    enrichment_path = os.path.join(output_dir, f"{study_id}_enrichment.json")
+    enrichment_path = os.path.join(output_dir, f"{study_id}_enrichment.parquet")
     matrix_path = os.path.join(output_dir, f"{study_id}_ea_matrix.csv")
     network_path = os.path.join(output_dir, f"{study_id}_network.pkl")
     embeddings_path = os.path.join(output_dir, f"{study_id}_embeddings.pkl")
     model_path = os.path.join(output_dir, f"{study_id}_model.pt")
+    cluster_emb_path = os.path.join(
+        output_dir, f"{study_id}_cluster_embeddings.parquet")
+    provenance_path = os.path.join(
+        output_dir, f"{study_id}_run_provenance.json")
 
     if gene_sets:
         gs = _parse_gene_sets(gene_sets)
@@ -271,10 +287,9 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
 
     # enrichment
     click.echo("step 1: enrichment")
-    ea_df = enrich(gs, level=level, gene_filter=gf)
+    ea_df = enrich(gs, level=level, gene_filter=gf, n_jobs=n_jobs)
+    ea_df.to_parquet(enrichment_path)
     records = ea_df.to_dict(orient="records")
-    with open(enrichment_path, "w") as f:
-        json.dump(records, f, indent=2)
     matrix = ea_matrix(ea_df, weight=weight)
     matrix.to_csv(matrix_path)
 
@@ -306,12 +321,38 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
         pickle.dump(embeddings, f)
     embedder.save_model(model_path)
 
+    cluster_emb = {k: v for k, v in embeddings.items()
+                   if isinstance(k, str) and k.startswith("cluster_")}
+    if cluster_emb:
+        emb_df = pd.DataFrame(cluster_emb).T
+        emb_df.index = [i.replace("cluster_", "", 1) for i in emb_df.index]
+        if meta_path:
+            emb_df = _join_meta(emb_df, pd.read_parquet(meta_path), meta_key)
+        emb_df.to_parquet(cluster_emb_path)
+
+    prov = {
+        "study_id": study_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "command": "end2end",
+        "level": level, "weight": weight, "method": method,
+        "dimensions": dimensions, "window": window, "epochs": epochs,
+        "lr": lr, "seed": seed, "n_jobs": n_jobs,
+        "gene_filter_applied": gf is not None,
+        "meta_applied": meta_path is not None,
+        "meta_key": meta_key if meta_path else None,
+        "n_gene_sets": len(gs),
+    }
+    Path(provenance_path).write_text(json.dumps(prov, indent=2))
+
     click.echo(f"done. output in {output_dir}")
     click.echo(f"  enrichment: {enrichment_path}")
     click.echo(f"  ea matrix: {matrix_path}")
     click.echo(f"  network: {network_path}")
     click.echo(f"  embeddings: {embeddings_path}")
+    if cluster_emb:
+        click.echo(f"  cluster embeddings: {cluster_emb_path}")
     click.echo(f"  model: {model_path}")
+    click.echo(f"  provenance: {provenance_path}")
 
 
 
@@ -340,6 +381,24 @@ def _niche_row(X, i):
     return np.asarray(r).ravel()
 
 
+def _join_meta(emb_df, meta, key):
+    """join all non-key columns of `meta` into `emb_df` on its string index.
+    no column names are hardcoded; whatever columns the user supplies in
+    `meta` (besides `key`) end up as columns of `emb_df`. silent no-op if
+    `meta` is None."""
+    if meta is None:
+        return emb_df
+    if key not in meta.columns:
+        raise click.ClickException(
+            f"meta key {key!r} not in meta columns: {list(meta.columns)}")
+    m = meta.copy()
+    m[key] = m[key].astype(str)
+    m = m.drop_duplicates(subset=[key]).set_index(key)
+    for col in m.columns:
+        emb_df[col] = emb_df.index.map(m[col].to_dict())
+    return emb_df
+
+
 @cli.command("niche-pipeline")
 @click.option("--niche-matrix", required=True,
               type=click.Path(exists=True, dir_okay=False),
@@ -349,7 +408,9 @@ def _niche_row(X, i):
               help=".npy of gene symbols aligned to matrix columns")
 @click.option("--niche-meta", required=True,
               type=click.Path(exists=True, dir_okay=False),
-              help="parquet with column 'niche_id' (+ optional subarray, patient)")
+              help="parquet with a key column (default 'niche_id', set with "
+                   "--niche-meta-key); any other columns are joined into the "
+                   "cluster embeddings parquet")
 @click.option("--out-dir", required=True, type=click.Path(file_okay=False))
 @click.option("--reactome-dir", default=None,
               type=click.Path(exists=True, file_okay=False),
@@ -381,12 +442,14 @@ def _niche_row(X, i):
 @click.option("--lr", default=0.005, show_default=True, type=float)
 @click.option("--seed", default=1234, show_default=True, type=int,
               help="rng seed for reproducible walks + embeddings")
+@click.option("--niche-meta-key", default="niche_id", show_default=True,
+              help="key column in --niche-meta matching cluster names")
 @click.option("--study-id", default=None)
 def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
                    reactome_dir, enrichment_method, reactome_level,
                    gene_filter_file, min_genes, max_genes, top_genes,
                    n_jobs, topk, pre_normalized, dimensions, epochs, lr,
-                   seed, study_id):
+                   seed, niche_meta_key, study_id):
     """niche expression -> enrichment (fisher|aucell) -> graph -> embeddings.
 
     fisher: per-niche top-N expressed genes -> Fisher's exact vs Reactome,
@@ -409,9 +472,11 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
             "--niche-matrix must be .npz (scipy sparse) or .npy (dense)")
     genes = np.load(genes_path, allow_pickle=True)
     meta = pd.read_parquet(niche_meta)
-    if "niche_id" not in meta.columns:
-        raise click.ClickException("--niche-meta must have a 'niche_id' column")
-    niche_ids = meta["niche_id"].astype(str).tolist()
+    if niche_meta_key not in meta.columns:
+        raise click.ClickException(
+            f"--niche-meta must have a {niche_meta_key!r} column "
+            f"(set with --niche-meta-key)")
+    niche_ids = meta[niche_meta_key].astype(str).tolist()
     if X.shape != (len(niche_ids), len(genes)):
         raise click.ClickException(
             f"shape mismatch: matrix {X.shape} vs "
@@ -482,10 +547,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
     if cluster_emb:
         emb_df = pd.DataFrame(cluster_emb).T
         emb_df.index = [i.replace("cluster_", "", 1) for i in emb_df.index]
-        m = meta.set_index(meta["niche_id"].astype(str))
-        for col in ("subarray", "patient"):
-            if col in meta.columns:
-                emb_df[col] = emb_df.index.map(m[col].to_dict())
+        emb_df = _join_meta(emb_df, meta, niche_meta_key)
         emb_df.to_parquet(
             os.path.join(out_dir, "cluster_embeddings.parquet"))
 
@@ -500,6 +562,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
         "pre_normalized": pre_normalized,
         "dimensions": dimensions, "epochs": epochs, "lr": lr,
         "seed": seed,
+        "niche_meta_key": niche_meta_key,
         "n_niches": len(niche_ids), "n_genes": len(genes),
     }
     Path(os.path.join(out_dir, "run_provenance.json")).write_text(
