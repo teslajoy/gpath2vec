@@ -13,7 +13,7 @@ setup(
     author="Nasim Sanati",
     author_email="nasim@plenary.org",
     license="MIT",
-    python_requires=">=3.14",
+    python_requires=">=3.9",
     install_requires=[
         "torch",
         "networkx",
