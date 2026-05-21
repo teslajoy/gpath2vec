@@ -105,7 +105,7 @@ def perform_enrichment(genes, gene_sets, level, gene_filter, weight, min_genes, 
         gene_list = _parse_genes(genes)
         gs = {"study": gene_list}
 
-    gf = _parse_genes(gene_filter) if gene_filter else None
+    gf = _load_gene_filter(gene_filter) if gene_filter else None
 
     click.echo(f"enrichment: {len(gs)} gene sets, level={level}")
     ea_df = enrich(gs, level=level, gene_filter=gf, min_genes=min_genes)
@@ -148,7 +148,7 @@ def create_network(enrichment_path, study_id, level, gene_filter, weight, digrap
     """create a pathway network from enrichment results"""
     assert Path(enrichment_path).is_file(), f"{enrichment_path} not found"
     study_id = _make_id(study_id)
-    gf = _parse_genes(gene_filter) if gene_filter else None
+    gf = _load_gene_filter(gene_filter) if gene_filter else None
 
     with open(enrichment_path) as f:
         ea_records = json.load(f)
@@ -283,29 +283,31 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
     else:
         raise click.UsageError("provide --genes or --gene-sets")
 
-    gf = _parse_genes(gene_filter) if gene_filter else None
+    gf = _load_gene_filter(gene_filter) if gene_filter else None
 
     # enrichment
     click.echo("step 1: enrichment")
     ea_df = enrich(gs, level=level, gene_filter=gf, n_jobs=n_jobs)
     ea_df.to_parquet(enrichment_path)
-    records = ea_df.to_dict(orient="records")
     matrix = ea_matrix(ea_df, weight=weight)
     matrix.to_csv(matrix_path)
 
     # network
     click.echo("step 2: network")
-    enrichment = aggregate_min_fdr(records)
-
+    # vectorized; avoids materializing ea_df as a python list of dicts
+    sig_df = ea_df[ea_df["sig_pathway"].astype(bool)]
+    if weight == "fdr":
+        sig_df = sig_df.assign(_w=1 - sig_df["fdr_bh"])
+    else:
+        sig_df = sig_df.assign(_w=sig_df["oddsratio"])
     clusters = {}
-    for r in records:
-        cname = r.get("cluster", "study")
-        if not r.get("sig_pathway", False):
-            continue
-        if cname not in clusters:
-            clusters[cname] = {}
-        val = (1 - r["fdr_bh"]) if weight == "fdr" else r.get("oddsratio", 1.0)
-        clusters[cname][r["stId"]] = val
+    for r in sig_df[["cluster", "stId", "_w"]].itertuples(index=False):
+        clusters.setdefault(str(r.cluster), {})[str(r.stId)] = float(r._w)
+
+    # same contract as aggregate_min_fdr: one entry per pathway with min FDR
+    pw_min = ea_df.groupby("stId", as_index=False)["fdr_bh"].min()
+    enrichment = [{"stId": str(r.stId), "entities": {"fdr": float(r.fdr_bh)}}
+                  for r in pw_min.itertuples(index=False)]
 
     net = Net(enrichment=enrichment, id=study_id, digraph=True,
               induce=False, level=level, gene_filter=gf,
@@ -357,20 +359,39 @@ def run_pipeline(genes, gene_sets, output_dir, study_id, level, gene_filter,
 
 
 def _load_gene_filter(path):
-    """JSON list of gene symbols, or a dict with one list value."""
-    obj = json.loads(Path(path).read_text())
-    if isinstance(obj, list):
-        return set(map(str, obj))
-    if isinstance(obj, dict):
-        for k in ("genes", "tf_genes"):
-            if isinstance(obj.get(k), list):
-                return set(map(str, obj[k]))
-        lists = [v for v in obj.values() if isinstance(v, list)]
-        if len(lists) == 1:
-            return set(map(str, lists[0]))
+    """robust gene-filter loader. accepts:
+      - JSON list of gene symbols
+      - JSON dict with a 'genes'/'tf_genes' key, or one list-valued key
+      - plain text, one gene symbol per line  (comments after '#' ignored)
+      - single comma-separated string in a file
+    returns set[str].
+    """
+    text = Path(path).read_text()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, list):
+            return set(map(str, obj))
+        if isinstance(obj, dict):
+            for k in ("genes", "tf_genes"):
+                if isinstance(obj.get(k), list):
+                    return set(map(str, obj[k]))
+            lists = [v for v in obj.values() if isinstance(v, list)]
+            if len(lists) == 1:
+                return set(map(str, lists[0]))
+    except json.JSONDecodeError:
+        pass
+    # fall back: plain text (line per gene or comma-separated)
+    lines = [ln.split("#", 1)[0].strip() for ln in text.splitlines()]
+    genes = []
+    for ln in lines:
+        if not ln:
+            continue
+        genes.extend(g.strip() for g in ln.split(",") if g.strip())
+    if genes:
+        return set(genes)
     raise click.ClickException(
-        f"--gene-filter {path}: expected a JSON list of gene symbols "
-        f"or a dict with one list value")
+        f"--gene-filter {path}: could not parse as JSON list/dict or as "
+        f"plain-text gene symbols")
 
 
 def _niche_row(X, i):
