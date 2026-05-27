@@ -5,20 +5,22 @@ import pandas as pd
 from sklearn.cross_decomposition import CCA
 
 
-def cca_compare(emb_a, emb_b, n_components=10):
+def cca_compare(emb_a, emb_b, n_components=10, seed=42):
     """
     canonical correlation analysis between two embedding matrices.
 
     emb_a, emb_b: numpy arrays (n_samples_a x dim), (n_samples_b x dim)
     n_components: number of canonical components
+    seed: rng seed for the subsample; local rng, does not touch global state
 
     returns: dict with correlations, transformed components, and summary
     """
     n = min(len(emb_a), len(emb_b))
     n_components = min(n_components, n, emb_a.shape[1])
 
-    idx_a = np.random.choice(len(emb_a), n, replace=False)
-    idx_b = np.random.choice(len(emb_b), n, replace=False)
+    rng = np.random.default_rng(seed)
+    idx_a = rng.choice(len(emb_a), n, replace=False)
+    idx_b = rng.choice(len(emb_b), n, replace=False)
     Xa = emb_a[idx_a]
     Xb = emb_b[idx_b]
 
@@ -40,11 +42,12 @@ def cca_compare(emb_a, emb_b, n_components=10):
     }
 
 
-def pairwise_cca(embeddings_dict, n_components=10):
+def pairwise_cca(embeddings_dict, n_components=10, seed=42):
     """
     run cca between all pairs of groups.
 
     embeddings_dict: {group_name: numpy array (n x dim)}
+    seed: rng seed threaded into each cca_compare call for reproducibility
     returns: dataframe with group_a, group_b, mean_corr, per-component correlations
     """
     names = sorted(embeddings_dict.keys())
@@ -54,7 +57,7 @@ def pairwise_cca(embeddings_dict, n_components=10):
         for j in range(i + 1, len(names)):
             a, b = names[i], names[j]
             res = cca_compare(embeddings_dict[a], embeddings_dict[b],
-                              n_components=n_components)
+                              n_components=n_components, seed=seed)
             row = {
                 "group_a": a,
                 "group_b": b,
