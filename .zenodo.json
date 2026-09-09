@@ -1,0 +1,30 @@
+{
+  "title": "gpath2vec: Pathway-Informed Feature Embeddings for Biological Observations from Gene Sets",
+  "description": "<p>A Python package for converting gene sets to biological pathway embeddings with enrichment analysis attributes. Gene sets from clusters, niches or studies are tested against Reactome pathways by Fisher's exact test or niche-level AUCell, then embedded into a shared vector space using metapath2vec over the Reactome pathway hierarchy graph. Alternative embedders (LINE, VAE, SVD, spectral) are included for ablation. All stochastic embedders are seeded and bit-reproducible, with run parameters recorded to <code>run_provenance.json</code>.</p>",
+  "upload_type": "software",
+  "license": "mit",
+  "version": "3.0.0",
+  "creators": [
+    {
+      "name": "Sanati, Nasim",
+      "orcid": "0000-0001-6681-0418",
+      "affiliation": "Oregon Health & Science University"
+    }
+  ],
+  "keywords": [
+    "bioinformatics",
+    "pathway embeddings",
+    "reactome",
+    "enrichment analysis",
+    "metapath2vec",
+    "spatial transcriptomics"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/teslajoy/gpath2vec",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ],
+  "publication_date": "2026-09-09"
+}

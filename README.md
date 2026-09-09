@@ -9,7 +9,7 @@ gene sets (from clusters, niches, studies) are tested against reactome pathways 
 
 enrichment is either fisher's exact (a binary top-N gene set per cluster/niche) or **niche-level AUCell** (the full per-niche expression ranking, no gene-set selection step). AUCell here scores each niche's **aggregated pseudobulk** profile, one score per (niche, pathway); it is **not single-cell AUCell** (the package never sees individual cells, niche construction is upstream). both enrichment sources feed the same reactome hierarchy graph and metapath2vec embedding.
 
-![gpath2vec.png](./img/gpath2vec.png)
+![gpath2vec](https://raw.githubusercontent.com/teslajoy/gpath2vec/main/img/gpath2vec.png)
 
 ## pipeline
 
@@ -177,6 +177,11 @@ gpath2vec end2end --genes "EGFR,EGF" --level low --method vae --output-dir outpu
 # --enrichment fisher : binary top-N gene set per niche, fisher's exact + fdr.
 # --enrichment aucell : niche-level AUCell on each niche's aggregated pseudobulk
 #                       (one score per niche, NOT single-cell), per-niche top-k as edges.
+# --aucell-standardize zscore : rank the per-niche top-k by cross-niche relative
+#                       elevation, so pathways that are high in EVERY niche
+#                       (the housekeeping floor) drop out. this is the cli
+#                       default. the library `topk_per_niche()` still defaults
+#                       to "none" (absolute score) for backward compatibility.
 # inputs: --niche-matrix (niches x genes .npz/.npy), --genes (.npy gene order),
 #         --niche-meta (parquet with a niche_id column).
 gpath2vec niche-pipeline \

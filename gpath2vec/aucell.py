@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -204,7 +205,7 @@ def compute_aucell(X, genes, niche_ids, *, level="all", gene_filter=None,
     return scores
 
 
-def topk_per_niche(aucell_df, k):
+def topk_per_niche(aucell_df, k, standardize="none"):
     """top-k AUCell pathways per niche -> clusters dict for `Net`.
 
     aucell_df : DataFrame (n_niches x n_pathways), continuous AUCell scores.
@@ -212,20 +213,62 @@ def topk_per_niche(aucell_df, k):
         over e.g. {20, 50, 100}). Low k = sparse, sharp per-niche identity but
         risk of under-connected niches; high k = denser, smoother, re-approaches
         the everything-connects-to-everything dilution. Always ablate + log k.
+    standardize : {"none", "zscore"}
+        how to RANK pathways for the per-niche top-k selection.
+        "none" (default): rank by the absolute AUCell score. on pseudobulk this
+            is dominated by ubiquitously high-expression machinery (translation,
+            ribosome, metabolism) that scores ~0.9 in nearly every niche, so most
+            niches connect to the SAME pathways and the niche->pathway edges
+            carry little between-niche signal.
+        "zscore": z-score each pathway ACROSS niches first, then rank by that
+            relative score. a pathway that is high in every niche has z~0
+            everywhere and is never selected; the top-k becomes the pathways
+            where THIS niche is most elevated relative to the cohort. this is the
+            cross-niche contrast that the within-niche AUCell ranking alone does
+            not provide. removes the shared housekeeping floor.
 
-    Mechanics: each niche row is the aggregated pseudobulk of its constituent
-    cells; its AUCell vector is that niche's pathway-activity profile. Keeping
-    the k highest-scoring pathways (dropping zeros) makes the niche->pathway
-    graph edges, with the RAW AUCell score as edge weight (non-negative, in
-    [0, ~1], directly usable by the weighted random walker).
+    NOTE on defaults: this function defaults to standardize="none", while the
+    cli `--aucell-standardize` defaults to "zscore". this divergence is
+    deliberate: direct library calls keep the pre-fix absolute selection so
+    existing runs stay reproducible, while new cli runs get the contrastive
+    selection. pass standardize explicitly if you care which you get.
+
+    edge weight is the RAW AUCell score in both modes (non-negative, in
+    [0, ~1], directly usable by the weighted random walker); only the SELECTION
+    criterion changes. pathways with no cross-niche variance are treated as
+    non-discriminative (z = 0) and effectively drop out of the ranking.
 
     returns: {niche_id: {pathway_stId: aucell_score, ...}} -- identical shape
     to the Fisher path's clusters dict, drop-in for the Net builder.
     """
+    if standardize not in ("none", "zscore"):
+        raise ValueError(
+            f"standardize must be 'none' or 'zscore', got {standardize!r}")
+
+    if standardize == "zscore" and len(aucell_df) < 2:
+        # cross-niche z-scoring is undefined with a single niche (zero variance
+        # everywhere); fall back to absolute selection rather than emit garbage.
+        warnings.warn(
+            "standardize='zscore' needs >=2 niches for a cross-niche contrast; "
+            f"got {len(aucell_df)}. falling back to absolute (standardize='none').",
+            RuntimeWarning, stacklevel=2)
+        standardize = "none"
+
+    if standardize == "zscore":
+        mu = aucell_df.mean(axis=0)
+        sd = aucell_df.std(axis=0, ddof=0)
+        # zero-variance pathways carry no between-niche signal -> z = 0 so they
+        # never win the top-k; avoid 0/0 by masking their std to NaN then 0.
+        rank_df = (aucell_df - mu) / sd.replace(0.0, np.nan)
+        rank_df = rank_df.fillna(0.0)
+    else:
+        rank_df = aucell_df
+
     clusters = {}
     for niche_id in aucell_df.index:
-        scores = aucell_df.loc[niche_id]
-        top = scores.nlargest(k)
-        top = top[top > 0]  # drop zero-AUCell pathways even if within top-k
-        clusters[str(niche_id)] = top.to_dict()
+        raw = aucell_df.loc[niche_id]
+        order = rank_df.loc[niche_id].nlargest(k).index
+        sel = raw.loc[order]
+        sel = sel[sel > 0]  # never connect to a zero-AUCell pathway
+        clusters[str(niche_id)] = sel.to_dict()
     return clusters
