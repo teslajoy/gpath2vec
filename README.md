@@ -2,6 +2,7 @@
 
 ![Status](https://img.shields.io/badge/Status-Build%20Passing-lgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22681141.svg)](https://doi.org/10.5281/zenodo.22681141)
 
 a python package for converting gene sets to biological pathway embeddings with enrichment analysis attributes.
 
@@ -260,6 +261,30 @@ gpath2vec niche-pipeline ... --reactome-dir /shared/path/reactome_cache
 ## reproducibility
 
 all stochastic embedders (metapath2vec, line, vae) take a `seed` (default 1234) that pins the python, numpy and torch rngs, so embeddings are bit-reproducible run to run. the seed is re-applied before training (independent of walk-generation rng) and recorded in `run_provenance.json`. svd and spectral are deterministic by construction. cli: `--seed`.
+
+## citation
+
+archived on zenodo. the DOI below is the *concept* DOI: it always resolves to
+the newest release, so it stays correct as versions are added.
+
+> Sanati, N. (2026). *gpath2vec: Pathway-Informed Feature Embeddings for
+> Biological Observations from Gene Sets*. Zenodo.
+> https://doi.org/10.5281/zenodo.22681141
+
+```bibtex
+@software{sanati_gpath2vec,
+  author    = {Sanati, Nasim},
+  title     = {{gpath2vec: Pathway-Informed Feature Embeddings for
+               Biological Observations from Gene Sets}},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.22681141},
+  url       = {https://doi.org/10.5281/zenodo.22681141}
+}
+```
+
+to cite the exact snapshot rather than the latest release, use the version DOI
+for v3.0.0: `10.5281/zenodo.22681142`.
 
 ## todo
 
