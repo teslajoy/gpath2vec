@@ -6,7 +6,7 @@ gene sets (from clusters, niches, studies) are tested against reactome pathways 
 
 enrichment is either fisher's exact (a binary top-N gene set per cluster/niche) or **niche-level AUCell** (the full per-niche expression ranking, no gene-set selection step). AUCell here scores each niche's **aggregated pseudobulk** profile, one score per (niche, pathway); it is **not single-cell AUCell** (the package never sees individual cells, niche construction is upstream). both enrichment sources feed the same reactome hierarchy graph and metapath2vec embedding.
 
-![gpath2vec.png](./img/gpath2vec.png)
+![gpath2vec](https://raw.githubusercontent.com/teslajoy/gpath2vec/main/img/gpath2vec.png)
 
 ## pipeline
 
