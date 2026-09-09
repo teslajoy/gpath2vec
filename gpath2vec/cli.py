@@ -454,6 +454,11 @@ def _join_meta(emb_df, meta, key):
               help="fisher: parallel enrichment workers (-1 = all cores)")
 @click.option("--topk", default=50, show_default=True, type=int,
               help="aucell: per-niche pathways kept (ablate 20/50/100)")
+@click.option("--aucell-standardize", default="zscore", show_default=True,
+              type=click.Choice(["none", "zscore"]),
+              help="aucell: top-k selection criterion. 'zscore' ranks pathways "
+                   "by cross-niche relative elevation (removes the shared "
+                   "housekeeping floor); 'none' ranks by absolute score")
 @click.option("--pre-normalized/--normalize", default=False,
               show_default=True,
               help="aucell: --normalize (default) applies "
@@ -469,7 +474,8 @@ def _join_meta(emb_df, meta, key):
 def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
                    reactome_dir, enrichment_method, reactome_level,
                    gene_filter_file, min_genes, max_genes, top_genes,
-                   n_jobs, topk, pre_normalized, dimensions, epochs, lr,
+                   n_jobs, topk, aucell_standardize, pre_normalized,
+                   dimensions, epochs, lr,
                    seed, niche_meta_key, study_id):
     """niche expression -> enrichment (fisher|aucell) -> graph -> embeddings.
 
@@ -538,7 +544,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
             max_genes=max_genes, normalize=not pre_normalized,
             provenance_path=os.path.join(out_dir, "aucell_params.json"))
         scores.to_parquet(os.path.join(out_dir, "aucell_scores.parquet"))
-        clusters = topk_per_niche(scores, topk)
+        clusters = topk_per_niche(scores, topk, standardize=aucell_standardize)
         net = Net(enrichment=[], id=study_id, digraph=True,
                   level=reactome_level, gene_filter=gene_filter,
                   clusters=clusters if clusters else None,
@@ -580,6 +586,7 @@ def niche_pipeline(niche_matrix, genes_path, niche_meta, out_dir,
         "gene_filter_applied": gene_filter is not None,
         "min_genes": min_genes, "max_genes": max_genes,
         "top_genes_fisher": top_genes, "topk_aucell": topk,
+        "aucell_standardize": aucell_standardize,
         "pre_normalized": pre_normalized,
         "dimensions": dimensions, "epochs": epochs, "lr": lr,
         "seed": seed,
