@@ -227,6 +227,12 @@ def topk_per_niche(aucell_df, k, standardize="none"):
             cross-niche contrast that the within-niche AUCell ranking alone does
             not provide. removes the shared housekeeping floor.
 
+    NOTE on defaults: this function defaults to standardize="none", while the
+    cli `--aucell-standardize` defaults to "zscore". this divergence is
+    deliberate: direct library calls keep the pre-fix absolute selection so
+    existing runs stay reproducible, while new cli runs get the contrastive
+    selection. pass standardize explicitly if you care which you get.
+
     edge weight is the RAW AUCell score in both modes (non-negative, in
     [0, ~1], directly usable by the weighted random walker); only the SELECTION
     criterion changes. pathways with no cross-niche variance are treated as

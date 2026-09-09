@@ -174,6 +174,11 @@ gpath2vec end2end --genes "EGFR,EGF" --level low --method vae --output-dir outpu
 # --enrichment fisher : binary top-N gene set per niche, fisher's exact + fdr.
 # --enrichment aucell : niche-level AUCell on each niche's aggregated pseudobulk
 #                       (one score per niche, NOT single-cell), per-niche top-k as edges.
+# --aucell-standardize zscore : rank the per-niche top-k by cross-niche relative
+#                       elevation, so pathways that are high in EVERY niche
+#                       (the housekeeping floor) drop out. this is the cli
+#                       default. the library `topk_per_niche()` still defaults
+#                       to "none" (absolute score) for backward compatibility.
 # inputs: --niche-matrix (niches x genes .npz/.npy), --genes (.npy gene order),
 #         --niche-meta (parquet with a niche_id column).
 gpath2vec niche-pipeline \
