@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "if you use this software, please cite it as below."
+type: software
+title: >-
+  gpath2vec: Pathway-Informed Feature Embeddings for Biological
+  Observations from Gene Sets
+abstract: >-
+  a python package for converting gene sets to biological pathway embeddings
+  with enrichment analysis attributes. gene sets from clusters, niches or
+  studies are tested against reactome pathways by fisher's exact test or
+  niche-level AUCell, then embedded into a shared vector space using
+  metapath2vec over the reactome pathway hierarchy graph.
+authors:
+  - family-names: Sanati
+    given-names: Nasim
+    email: nasim@plenary.org
+    affiliation: Oregon Health & Science University
+    orcid: "https://orcid.org/0000-0001-6681-0418"
+version: 3.0.0
+date-released: "2026-09-09"
+license: MIT
+repository-code: "https://github.com/teslajoy/gpath2vec"
+url: "https://github.com/teslajoy/gpath2vec"
+keywords:
+  - bioinformatics
+  - pathway embeddings
+  - reactome
+  - enrichment analysis
+  - metapath2vec
+  - spatial transcriptomics
